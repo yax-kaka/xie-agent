@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小说 CLI Agent — 产品设计 v1</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --card: #1c2029; --border: #2a2f3a;
+    --text: #e6e8ee; --muted: #9aa3b2; --accent: #7c9cff; --accent2: #5ad1b0;
+    --warn: #ffb454; --danger: #ff6b6b; --purple: #c792ea;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; padding: 40px 20px; }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 28px; margin-bottom: 6px; }
+  .sub { color: var(--muted); margin-bottom: 30px; }
+  h2 { font-size: 20px; margin: 44px 0 16px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  h3 { font-size: 16px; margin: 26px 0 10px; color: var(--accent2); }
+  p { margin-bottom: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 16px 0; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+  .b-p0 { background: #3a2f14; color: var(--warn); }
+  .b-p1 { background: #14324a; color: var(--accent); }
+  .b-p2 { background: #232a3a; color: var(--muted); }
+  .b-core { background: #143a2f; color: var(--accent2); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin: 14px 0; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .card h4 { color: var(--accent); font-size: 15px; margin-bottom: 8px; }
+  .card ul { list-style: none; }
+  .card li { font-size: 13.5px; color: var(--muted); padding: 3px 0; padding-left: 18px; position: relative; }
+  .card li::before { content: "▸"; position: absolute; left: 0; color: var(--accent2); }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px 10px; border-bottom: 2px solid var(--border); white-space: nowrap; }
+  td { padding: 8px 10px; border-bottom: 1px solid #22262f; vertical-align: top; }
+  tr:hover td { background: #1a1e27; }
+  code { background: #232a3a; padding: 1px 7px; border-radius: 5px; font-family: Consolas, monospace; font-size: 13px; color: var(--accent2); }
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 16px 0; }
+  .flow-step { display: flex; gap: 14px; align-items: flex-start; }
+  .flow-marker { flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%; background: var(--accent); color: #0f1115; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 14px; margin-top: 4px; }
+  .flow-body { padding-bottom: 20px; border-left: 2px solid var(--border); padding-left: 18px; margin-left: 14px; flex: 1; }
+  .flow-step:last-child .flow-body { border-left-color: transparent; }
+  .flow-title { font-weight: 600; margin-bottom: 4px; }
+  .flow-text { color: var(--muted); font-size: 13.5px; }
+  .tree { background: #10131a; border: 1px solid var(--border); border-radius: 10px; padding: 18px 22px; font-family: Consolas, monospace; font-size: 13px; line-height: 1.8; overflow-x: auto; white-space: pre; color: #c3cad8; }
+  .tree .c { color: var(--accent2); }
+  .tree .d { color: var(--muted); }
+  .callout { border-left: 3px solid var(--warn); background: #221d12; padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; font-size: 14px; }
+  .callout b { color: var(--warn); }
+  .decision { background: #141a2e; border: 1px solid #2c3a66; border-radius: 10px; padding: 14px 18px; margin: 10px 0; }
+  .decision .q { color: var(--accent); font-weight: 700; margin-bottom: 4px; }
+  .decision .opt { color: var(--muted); font-size: 13.5px; }
+  .footer { margin-top: 50px; color: var(--muted); font-size: 12.5px; text-align: center; border-top: 1px solid var(--border); padding-top: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>📖 小说 CLI Agent — 产品设计 v1</h1>
+  <div class="sub">架构参考 opencode 的 CLI Agent 范式 · 为长篇小说创作量身定制 · 2026-08-12</div>
+
+  <div class="panel">
+    <b>一句话定位:</b>一个跑在终端里的"写作搭档"——像编程 Agent 操作代码一样,用 <code>/命令</code> 管理人物、世界观、时间线,用自然语言指挥 AI 写稿、改稿、查一致性;长篇小说所有状态以"文件即数据库"的形式落在作品目录里,可随时 git 版本管理。
+  </div>
+
+  <h2>一、功能全景(头脑风暴结果)</h2>
+  <p>按优先级分三档:<span class="badge b-p0">P0 核心</span>决定产品能否成立;<span class="badge b-p1">P1 重要</span>显著提升创作质量;<span class="badge b-p2">P2 增强</span>锦上添花。其中一致性校验(<code>/check</code>)是小说 Agent 区别于"套壳聊天"的杀手锏。</p>
+
+  <div class="grid">
+    <div class="card"><h4>📇 人物管理 <code>/char</code> <span class="badge b-p0">P0</span></h4>
+      <ul>
+        <li>人物卡片:外貌/性格/动机/背景/口头禅/秘密</li>
+        <li>人物关系图谱(亲缘/同盟/敌对/暗恋…)</li>
+        <li>人物出场状态:活跃/暂离/退场/死亡</li>
+        <li>人设一致性校验(防崩人设)</li>
+      </ul>
+    </div>
+    <div class="card"><h4>🌍 世界观管理 <code>/world</code> <span class="badge b-p0">P0</span></h4>
+      <ul>
+        <li>设定条目:地理/历史/政治/力量体系/种族/文化</li>
+        <li>条目版本记录,可回滚</li>
+        <li>设定冲突检测(新条目与旧设定矛盾时提醒)</li>
+        <li>按需注入:写作时只加载相关条目</li>
+      </ul>
+    </div>
+    <div class="card"><h4>✍️ 写作风格 <code>/style</code> <span class="badge b-p0">P0</span></h4>
+      <ul>
+        <li>风格预设库:网文爽文/轻小说/悬疑/严肃文学</li>
+        <li>自定义风格描述 + 参数(视角/时态/句长/描写密度)</li>
+        <li>范文提取风格:喂 3 段样例,生成风格指南</li>
+        <li>分卷/分角色风格覆盖</li>
+      </ul>
+    </div>
+    <div class="card"><h4>📈 主角成长 <code>/growth</code> <span class="badge b-p0">P0</span></h4>
+      <ul>
+        <li>成长弧线:能力值/心性/信念的阶段性变化</li>
+        <li>成长里程碑 ↔ 剧情节点绑定</li>
+        <li>战力/等级体系(网文刚需)</li>
+        <li>成长曲线可视化 + 停滞预警</li>
+      </ul>
+    </div>
+    <div class="card"><h4>⏳ 时间管理 <code>/time</code> <span class="badge b-p0">P0</span></h4>
+      <ul>
+        <li>自定义纪年/日历/节日系统</li>
+        <li>剧情时间线:章节 ↔ 时间点映射</li>
+        <li>时间线一致性校验(角色 3 天前还在 A 城,今天出现在 B 城 → 报警)</li>
+        <li>剧情内倒计时事件(如"7 天后比武")</li>
+      </ul>
+    </div>
+    <div class="card"><h4>⚙️ 模型配置 <code>/config</code> <span class="badge b-p0">P0</span></h4>
+      <ul>
+        <li>多 Provider:DeepSeek/OpenAI/Anthropic/本地 Ollama</li>
+        <li>任务分级:规划用强模型,批量生成用便宜模型</li>
+        <li>每任务独立参数(温度/长度/seed)</li>
+        <li>key 管理 + 用量统计</li>
+      </ul>
+    </div>
+    <div class="card"><h4>🧩 大纲与情节 <code>/outline</code> <span class="badge b-p0">P0</span></h4>
+      <ul>
+        <li>总纲 → 卷 → 章 三层拆解</li>
+        <li>情节结构:三幕/起承转合/黄金三章</li>
+        <li>情节点管理(钩子/反转/高潮位置标注)</li>
+        <li>伏笔管理:埋设 → 跟踪 → 回收清单</li>
+      </ul>
+    </div>
+    <div class="card"><h4>🖋 写作执行 <code>/write</code> <span class="badge b-p0">P0</span></h4>
+      <ul>
+        <li>续写/扩写/改写/重写 四种模式</li>
+        <li>多版本生成,用户挑选合并</li>
+        <li>卡文救援:给 3 个剧情走向选项</li>
+        <li>批量生成(一次性产出 N 章草稿)</li>
+      </ul>
+    </div>
+    <div class="card"><h4>🛡 一致性校验 <code>/check</code> <span class="badge b-p1">P1 ★杀手锏</span></h4>
+      <ul>
+        <li>人设/时间线/世界观/战力 四类校验</li>
+        <li>伏笔回收检查:埋了没回收的伏笔清单</li>
+        <li>对话口癖/称呼一致性(叫"林晚"还是"晚晚")</li>
+        <li>校验报告直接给出修改建议</li>
+      </ul>
+    </div>
+    <div class="card"><h4>🧠 记忆分层 <code>/memory</code> <span class="badge b-p1">P1 ★核心难点</span></h4>
+      <ul>
+        <li>固定层:风格 + 世界观核心 + 当前人物状态</li>
+        <li>滚动层:最近 N 章全文(默认 3-5 章)</li>
+        <li>按需层:大纲节点 / 时间线 / 待回收伏笔</li>
+        <li>自动摘要压缩:长作品防止上下文爆炸</li>
+      </ul>
+    </div>
+    <div class="card"><h4>📚 章节与卷 <code>/chapter</code> <span class="badge b-p1">P1</span></h4>
+      <ul>
+        <li>章节状态机:草稿 → 初稿 → 修订 → 定稿</li>
+        <li>字数统计 + 日更目标追踪</li>
+        <li>章节标题/摘要自动生成</li>
+      </ul>
+    </div>
+    <div class="card"><h4>👁 读者视角 <code>/reader</code> <span class="badge b-p1">P1</span></h4>
+      <ul>
+        <li>AI 模拟读者:毒点检测(爽点密度/节奏拖沓/降智)</li>
+        <li>断章位置评估(网文追读体验)</li>
+        <li>角色代入感盲测(换视角重读)</li>
+      </ul>
+    </div>
+    <div class="card"><h4>💡 灵感库 <code>/idea</code> <span class="badge b-p2">P2</span></h4>
+      <ul>
+        <li>灵感碎片速记(随时 /idea 记一笔)</li>
+        <li>自动点子生成(基于现有设定)</li>
+        <li>灵感 ↔ 章节/伏笔关联</li>
+      </ul>
+    </div>
+    <div class="card"><h4>📤 导出发布 <code>/export</code> <span class="badge b-p2">P2</span></h4>
+      <ul>
+        <li>导出 Markdown / TXT / EPUB / DOCX</li>
+        <li>网文平台排版预处理</li>
+      </ul>
+    </div>
+    <div class="card"><h4>📊 写作统计 <code>/stats</code> <span class="badge b-p2">P2</span></h4>
+      <ul>
+        <li>字数/速度/连续创作天数</li>
+        <li>燃尽图(进度 vs 目标)</li>
+        <li>各模型 token 消耗账单</li>
+      </ul>
+    </div>
+    <div class="card"><h4>🔀 多线剧情 <code>/pov</code> <span class="badge b-p2">P2</span></h4>
+      <ul>
+        <li>多视角(POV)章节管理</li>
+        <li>支线任务独立时间线</li>
+        <li>主线/支线交叉点标注</li>
+      </ul>
+    </div>
+    <div class="card"><h4>🎙 语音写作 <code>/voice</code> <span class="badge b-p2">P2</span></h4>
+      <ul>
+        <li>语音口述 → 转写 → 整理成稿</li>
+        <li>适合通勤/散步时的灵感输出</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>二、架构设计(参考 opencode)</h2>
+  <p>opencode 的核心是 <b>TUI + Agent 核心 + 工具层</b> 三层:用户通过 TUI 发指令,Agent 循环(意图→上下文→LLM→工具)执行,所有状态落到文件系统。小说 Agent 完全复用这个骨架,只把"代码域工具"换成"小说域工具"。</p>
+
+  <div class="flow">
+    <div class="flow-step"><div class="flow-marker">1</div><div class="flow-body">
+      <div class="flow-title">TUI 交互层</div>
+      <div class="flow-text">终端全屏界面,支持 <code>/命令</code>、多行输入、流式输出、会话历史、快捷编辑。参考 opencode 的 Ink(TS) 或 Bubble Tea(Go) 实现。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">2</div><div class="flow-body">
+      <div class="flow-title">Agent 核心(意图路由 + 上下文组装)</div>
+      <div class="flow-text">用户输入先走意图路由(写/改/查/管理)。写作类请求进入"上下文组装器":按当前章节、出场人物、时间点,从作品库动态拼装 prompt——这是小说 Agent 与编程 Agent 最大的不同,下文详述。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">3</div><div class="flow-body">
+      <div class="flow-title">工具层(小说域工具集)</div>
+      <div class="flow-text">每个功能背后是结构化工具:<code>char.get</code>、<code>world.get</code>、<code>timeline.check</code>、<code>chapter.append</code>、<code>vault.scan</code>、<code>style.load</code>… 工具返回 JSON,让 LLM 既能生成又能精确读写状态。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">4</div><div class="flow-body">
+      <div class="flow-title">作品库(文件即数据库)</div>
+      <div class="flow-text">一个作品 = 一个目录,Markdown/JSON 平铺,人类可读、git 可管、可手改。不做隐藏数据库,保证"文件在,作品就在"。</div>
+    </div></div>
+  </div>
+
+  <h3>作品目录结构(核心设计)</h3>
+  <div class="tree"><span class="c">my-novel/</span>                    <span class="d"># 一个作品一个目录</span>
+├── <span class="c">novel.json</span>                <span class="d"># 作品元数据:书名/简介/当前时间点/模型绑定</span>
+├── <span class="c">style.md</span>                  <span class="d"># 风格指南(可多份,按卷切换)</span>
+├── <span class="c">outline/</span>
+│   ├── <span class="c">arc.md</span>                  <span class="d"># 总纲 + 卷结构</span>
+│   └── <span class="c">plot-points.json</span>        <span class="d"># 情节点/钩子/高潮位置(结构化,机器可读)</span>
+├── <span class="c">world/</span>
+│   ├── <span class="c">geography.md</span>  <span class="c">magic.md</span>  <span class="c">factions.md</span> …   <span class="d"># 按领域拆分,按需注入</span>
+├── <span class="c">characters/</span>
+│   ├── <span class="c">linwan.md</span>                <span class="d"># 每人一个文件,含元数据块(YAML front matter)</span>
+│   └── <span class="c">relations.json</span>          <span class="d"># 人物关系图数据</span>
+├── <span class="c">timeline.md</span>               <span class="d"># 纪年法 + 剧情时间线表</span>
+├── <span class="c">vault.md</span>                  <span class="d"># 伏笔台账:埋设章 / 状态 / 计划回收章</span>
+├── <span class="c">chapters/</span>
+│   ├── <span class="c">001.md</span>  <span class="c">002.md</span> …           <span class="d"># 章节正文 + 头部元数据(时间/地点/出场人物/POV)</span>
+├── <span class="c">notes/</span>                    <span class="d"># 灵感碎片、废弃设定</span>
+└── <span class="c">.agent/</span>                   <span class="d"># agent 运行时状态(会话历史、索引缓存)</span></div>
+
+  <h3>人物卡片 schema(示例)</h3>
+  <div class="panel"><code style="display:block;white-space:pre;line-height:1.7">---
+name: 林晚
+role: 主角
+status: active            # active / off-stage / dead
+appearances: [001, 002, 005]
+---
+外貌: 黑发及腰,左眉一道旧疤,惯穿墨色长衫
+性格: 外冷内热,对承诺近乎偏执;怕黑(童年地窖)
+动机: 找出兄长失踪真相,守护妹妹
+能力: 剑术(三流)→ 心法突破后(一流)  # growth 字段自动跟踪
+口头禅: "这笔账,我记下了。"
+秘密: 母亲并非死于意外(伏笔#7 关联)
+关系: 师父-沈无涯(敌对?) · 妹妹-林小满(至亲) · 情敌-顾长风</code></div>
+
+  <h2>三、上下文组装策略(小说 Agent 的灵魂)</h2>
+  <p>编程 Agent 的上下文是"文件 + AGENTS.md + 历史";小说 Agent 必须解决 <b>长文一致性</b>——100 万字小说不可能全塞进上下文。方案是<b>三层记忆 + 动态组装</b>,每个写作请求按需拼装:</p>
+
+  <table>
+    <tr><th>层级</th><th>内容</th><th>注入时机</th><th>估算 Token</th></tr>
+    <tr><td><b>固定层</b>(常驻)</td><td>风格指南 + 世界观核心条目 + 当前 POV 人物档案 + 主角成长当前阶段 + 小说简介</td><td>每次写作请求</td><td>~3-6K</td></tr>
+    <tr><td><b>滚动层</b>(滑动窗口)</td><td>最近 3-5 章全文 + 本章大纲节点 + 上一章结尾</td><td>每次写作请求</td><td>~6-15K</td></tr>
+    <tr><td><b>按需层</b>(工具查询)</td><td>出场人物档案 · 当前时间点前后剧情 · 未回收伏笔 · 地点/势力设定 · 旧章节细节</td><td>意图路由识别需要时,调工具注入</td><td>~1-4K/次</td></tr>
+    <tr><td><b>压缩层</b>(防爆炸)</td><td>更早章节 → 摘要索引(每 10 章生成一卷摘要,可展开)</td><td>超过窗口时自动触发</td><td>—</td></tr>
+  </table>
+
+  <div class="callout"><b>设计要点:</b>章节头部强制写结构化元数据(时间/地点/出场人物/POV/伏笔标记),这是后面 <code>/check</code> 一致性和上下文按需注入的数据基础——"写的时候顺手记,查的时候不用翻全文"。</div>
+
+  <h2>四、命令体系(全量设计)</h2>
+  <table>
+    <tr><th>命令</th><th>功能</th><th>命令</th><th>功能</th></tr>
+    <tr><td><code>/init</code></td><td>初始化新作品(引导式提问世界观基调)</td><td><code>/char</code></td><td>人物增删改查 / 关系图</td></tr>
+    <tr><td><code>/write</code></td><td>续写(默认在当前时间点)</td><td><code>/world</code></td><td>世界观条目管理</td></tr>
+    <tr><td><code>/rewrite</code> <code>/expand</code></td><td>改写 / 扩写指定段落</td><td><code>/style</code></td><td>风格管理 / 范文提取</td></tr>
+    <tr><td><code>/outline</code></td><td>大纲、卷、情节节点管理</td><td><code>/growth</code></td><td>主角成长曲线管理</td></tr>
+    <tr><td><code>/time</code></td><td>日历 / 时间线管理</td><td><code>/check</code></td><td>一致性校验(人设/时间/世界观/伏笔)</td></tr>
+    <tr><td><code>/vault</code></td><td>伏笔埋设 / 回收 / 台账</td><td><code>/chapter</code></td><td>章节状态 / 字数 / 目标</td></tr>
+    <tr><td><code>/memory</code></td><td>记忆分层查看 / 手动压缩 / 注入调试</td><td><code>/reader</code></td><td>AI 读者反馈 / 毒点检测</td></tr>
+    <tr><td><code>/idea</code></td><td>灵感速记 / 点子生成</td><td><code>/config</code></td><td>模型 / Provider / 参数配置</td></tr>
+    <tr><td><code>/stats</code></td><td>写作统计与账单</td><td><code>/export</code></td><td>导出 MD/TXT/EPUB/DOCX</td></tr>
+    <tr><td><code>/sessions</code></td><td>会话历史(仿 opencode)</td><td><code>/help</code></td><td>帮助 + 自定义命令发现</td></tr>
+  </table>
+  <p>自定义命令走 opencode 同款机制:<code>.agent/commands/</code> 下放 Markdown 文件,定义 prompt 模板,用户可自造 <code>/黄金三章</code>、<code>/断章</code> 这类私房命令。</p>
+
+  <h2>五、技术栈建议</h2>
+  <table>
+    <tr><th>方案</th><th>TUI</th><th>优点</th><th>缺点</th></tr>
+    <tr><td><b>A. Node.js + TypeScript</b>(推荐)</td><td>Ink / React Ink</td><td>生态最熟,AI 生成代码质量高,opencode 同款技术栈,开发最快</td><td>启动略慢、打包稍麻烦</td></tr>
+    <tr><td><b>B. Go</b></td><td>Bubble Tea</td><td>单二进制分发,性能好(opencode 的 TUI 就是 Go)</td><td>UI 开发迭代慢,生态偏少</td></tr>
+    <tr><td><b>C. Rust</b></td><td>ratatui</td><td>极致性能与分发</td><td>开发成本最高,不推荐 MVP</td></tr>
+  </table>
+  <p>存储:纯文件(Markdown + JSON)<b>先不引入数据库</b>,目录即数据库;等需要全文检索时再加 SQLite 索引层。</p>
+
+  <h2>六、路线图</h2>
+  <div class="flow">
+    <div class="flow-step"><div class="flow-marker">M1</div><div class="flow-body">
+      <div class="flow-title">MVP(2-3 周)</div>
+      <div class="flow-text">TUI + <code>/init /write /config /chapter</code> + 作品目录生成 + DeepSeek 接入 + 章节文件读写。此时已能"正经写小说"。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">M2</div><div class="flow-body">
+      <div class="flow-title">设定管理(2 周)</div>
+      <div class="flow-text"><code>/char /world /style /outline /time</code> 全部落地,上下文组装器上线,写作时自动注入相关设定。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">M3</div><div class="flow-body">
+      <div class="flow-title">质量体系(2 周)</div>
+      <div class="flow-text"><code>/check</code> 一致性校验(基于章节元数据做时间线/人设规则检查)+ <code>/growth</code> + <code>/vault</code> 伏笔台账 + <code>/reader</code> 毒点检测。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">M4</div><div class="flow-body">
+      <div class="flow-title">打磨发布(持续)</div>
+      <div class="flow-text"><code>/export</code> EPUB/DOCX、<code>/stats</code> 账单、自定义命令市场、多作品管理、模板库。</div>
+    </div></div>
+  </div>
+
+  <h2>七、待你拍板的决策点</h2>
+  <div class="decision"><div class="q">D1 · 技术栈</div><div class="opt">Node/TS(推荐,快) / Go(分发好) / Rust(性能,不推荐 MVP)</div></div>
+  <div class="decision"><div class="q">D2 · 作品形态</div><div class="opt">单作品工作目录 vs 多作品管理(一个 CLI 管所有书,<code>/new</code> 切换)</div></div>
+  <div class="decision"><div class="q">D3 · 写作定位</div><div class="opt">中文网文优先(爽点/断章/毒点检测) vs 通用文学创作(风格更宽,弱化爽文指标)</div></div>
+  <div class="decision"><div class="q">D4 · 交互深度</div><div class="opt">全屏 TUI(opencode 式,沉浸) vs 轻量 REPL(启动快,命令即工具) vs 两者都要</div></div>
+  <div class="decision"><div class="q">D5 · 一致性校验的实现路线</div><div class="opt">规则引擎(元数据硬校验,快且确定) vs LLM 校验(灵活但烧 token) vs 混合(推荐:规则先行 + LLM 兜底)</div></div>
+
+  <div class="footer">小说 CLI Agent · 设计文档 v1 · 下一步:确认决策点后出技术方案与项目脚手架</div>
+</div>
+</body>
+</html>

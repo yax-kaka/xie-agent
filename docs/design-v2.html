@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小说 CLI Agent — 设计定稿 v2</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --card: #1c2029; --border: #2a2f3a;
+    --text: #e6e8ee; --muted: #9aa3b2; --accent: #7c9cff; --accent2: #5ad1b0;
+    --warn: #ffb454; --danger: #ff6b6b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; line-height: 1.7; padding: 40px 20px; }
+  .wrap { max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 28px; margin-bottom: 6px; }
+  .sub { color: var(--muted); margin-bottom: 30px; }
+  h2 { font-size: 20px; margin: 44px 0 16px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  h3 { font-size: 16px; margin: 26px 0 10px; color: var(--accent2); }
+  p { margin-bottom: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin: 16px 0; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; margin-right: 6px; }
+  .b-done { background: #143a2f; color: var(--accent2); }
+  .b-plan { background: #14324a; color: var(--accent); }
+  .b-dec { background: #3a2f14; color: var(--warn); }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; padding: 8px 10px; border-bottom: 2px solid var(--border); white-space: nowrap; }
+  td { padding: 8px 10px; border-bottom: 1px solid #22262f; vertical-align: top; }
+  tr:hover td { background: #1a1e27; }
+  code { background: #232a3a; padding: 1px 7px; border-radius: 5px; font-family: Consolas, monospace; font-size: 13px; color: var(--accent2); }
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 16px 0; }
+  .flow-step { display: flex; gap: 14px; align-items: flex-start; }
+  .flow-marker { flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%; background: var(--accent); color: #0f1115; font-weight: 700; display: flex; align-items: center; justify-content: center; font-size: 14px; margin-top: 4px; }
+  .flow-body { padding-bottom: 20px; border-left: 2px solid var(--border); padding-left: 18px; margin-left: 14px; flex: 1; }
+  .flow-step:last-child .flow-body { border-left-color: transparent; }
+  .flow-title { font-weight: 600; margin-bottom: 4px; }
+  .flow-text { color: var(--muted); font-size: 13.5px; }
+  .callout { border-left: 3px solid var(--warn); background: #221d12; padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 14px 0; font-size: 14px; }
+  .footer { margin-top: 50px; color: var(--muted); font-size: 12.5px; text-align: center; border-top: 1px solid var(--border); padding-top: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>📖 小说 CLI Agent — 设计定稿 v2</h1>
+  <div class="sub">基于 v1 头脑风暴 + D1-D5 决策定稿 · M1 骨架已落地 · 2026-08-12</div>
+
+  <h2>一、定稿决策</h2>
+  <table>
+    <tr><th>决策</th><th>结论</th><th>说明</th></tr>
+    <tr><td>D1 技术栈</td><td><b>TypeScript + Bun</b>(opencode 同栈)</td><td>Windows 目标;权限逻辑、项目识别、命令机制直接参考 opencode 源码(packages/opencode/src)</td></tr>
+    <tr><td>D2 作品形态</td><td><b>进目录即作品</b></td><td>从 cwd 向上查找 novel.json;无 /new 切换,一个目录一部书</td></tr>
+    <tr><td>D3 写作定位</td><td><b>中文网文优先</b></td><td>爽点/断章/毒点检测进路线图;默认风格"快节奏、章末留钩子"</td></tr>
+    <tr><td>D4 交互深度</td><td><b>轻量 REPL</b></td><td>单行提示符 xie&gt;,命令 + 自由输入写作指令;不搞全屏 TUI</td></tr>
+    <tr><td>D5 一致性校验</td><td><b>规则引擎 + LLM 混合</b></td><td>/check 规则先行(时间线/伏笔/章节硬校验),LLM 深度校验为 M3 增强</td></tr>
+  </table>
+
+  <h2>二、当前实现(M1 骨架,已可运行)</h2>
+  <div class="panel">
+    <span class="badge b-done">已实现</span> REPL 主循环 · <code>/init</code> 作品初始化 · <code>/write</code> 上下文组装 + DeepSeek 接入 · <code>/char</code> 人物增查 · <code>/config</code> 模型配置 · <code>/check</code> 规则校验 · 作品目录脚手架 · 零外部写入
+  </div>
+
+  <table>
+    <tr><th>文件</th><th>职责</th></tr>
+    <tr><td><code>src/index.ts</code></td><td>入口:作品识别 + REPL 主循环(命令/自由输入分流)</td></tr>
+    <tr><td><code>src/novel.ts</code></td><td>作品管理:向上查找 novel.json、目录脚手架、章节/人物读写</td></tr>
+    <tr><td><code>src/commands.ts</code></td><td>命令系统 + 内置命令 + 上下文组装器(三层记忆雏形)</td></tr>
+    <tr><td><code>src/config.ts</code></td><td>作品级 novel.json 配置读写</td></tr>
+    <tr><td><code>src/llm.ts</code></td><td>模型层:DeepSeek/OpenAI/Ollama/智谱(OpenAI 兼容接口)</td></tr>
+    <tr><td><code>src/permission.ts</code></td><td>权限评估:ask/allow/deny + 通配符(移植 opencode evaluate 语义)</td></tr>
+  </table>
+
+  <h2>三、架构(定案)</h2>
+  <div class="flow">
+    <div class="flow-step"><div class="flow-marker">1</div><div class="flow-body">
+      <div class="flow-title">REPL 交互层(轻量)</div>
+      <div class="flow-text"><code>xie&gt;</code> 提示符;输入 <code>/命令</code> 走命令路由,其他输入 = 写作指令。真实终端逐行交互,管道输入亦可脚本化。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">2</div><div class="flow-body">
+      <div class="flow-title">命令系统(仿 opencode)</div>
+      <div class="flow-text">内置命令注册表;后续支持配置自定义命令(模板 + <code>$1</code>/<code>$ARGUMENTS</code> 占位符,opencode command 机制)。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">3</div><div class="flow-body">
+      <div class="flow-title">上下文组装器</div>
+      <div class="flow-text">写作请求自动拼装:风格指南(固定层)+ 当前章节 + 最近章节(滚动层)+ 人物档案(按需层);M2 扩展世界观/时间线/伏笔注入。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">4</div><div class="flow-body">
+      <div class="flow-title">模型层 + 作品库</div>
+      <div class="flow-text">OpenAI 兼容 chat/completions;novel.json 配置 provider/model,apiKey 走环境变量或配置。作品 = 目录(文件即数据库),零目录外写入。</div>
+    </div></div>
+  </div>
+
+  <h2>四、命令路线(已实现 / 规划)</h2>
+  <table>
+    <tr><th>命令</th><th>状态</th><th>功能</th></tr>
+    <tr><td><code>/init</code> <code>/write</code> <code>/char</code> <code>/config</code> <code>/check</code> <code>/help</code> <code>/quit</code></td><td><span class="badge b-done">M1 已实现</span></td><td>作品初始化 / AI 续写 / 人物管理 / 模型配置 / 规则校验 / 帮助 / 退出</td></tr>
+    <tr><td><code>/world</code> <code>/style</code> <code>/outline</code> <code>/time</code> <code>/growth</code> <code>/chapter</code></td><td><span class="badge b-plan">M2</span></td><td>世界观条目 / 风格管理(范文提取)/ 大纲与情节点 / 时间线管理 / 主角成长 / 章节状态机</td></tr>
+    <tr><td><code>/vault</code> <code>/reader</code> <code>/check -deep</code></td><td><span class="badge b-plan">M3</span></td><td>伏笔台账 / AI 读者毒点检测 / LLM 深度一致性校验</td></tr>
+    <tr><td><code>/export</code> <code>/stats</code> <code>/idea</code> <code>/pov</code></td><td><span class="badge b-plan">M4</span></td><td>导出 EPUB/DOCX / 写作统计账单 / 灵感库 / 多视角管理</td></tr>
+  </table>
+
+  <h2>五、路线图(更新)</h2>
+  <div class="flow">
+    <div class="flow-step"><div class="flow-marker">✓</div><div class="flow-body">
+      <div class="flow-title">M1 骨架 — 已完成</div>
+      <div class="flow-text">REPL + 6 个命令 + DeepSeek 接入 + 作品脚手架,已在本机跑通验证。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">2</div><div class="flow-body">
+      <div class="flow-title">M2 设定管理</div>
+      <div class="flow-text">/world /style /outline /time /growth /chapter;上下文组装器扩展(世界观/时间线/伏笔注入);自定义命令机制。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">3</div><div class="flow-body">
+      <div class="flow-title">M3 质量体系</div>
+      <div class="flow-text">/vault 伏笔台账联动 /check;LLM 深度校验;AI 读者毒点检测;成长曲线。</div>
+    </div></div>
+    <div class="flow-step"><div class="flow-marker">4</div><div class="flow-body">
+      <div class="flow-title">M4 打磨发布</div>
+      <div class="flow-text">EPUB/DOCX 导出、统计账单、灵感库、多 POV、发布为全局命令(xie)。</div>
+    </div></div>
+  </div>
+
+  <div class="callout"><b>下一步:</b>配置 <code>DEEPSEEK_API_KEY</code> 后即可真实写作。建议立即推进 M2 的 <code>/world</code> 与 <code>/time</code>(设定先行,写作质量提升最明显)。</div>
+
+  <div class="footer">小说 CLI Agent · 设计定稿 v2 · 源码在项目根 src/,参考源码 reference/opencode</div>
+</div>
+</body>
+</html>

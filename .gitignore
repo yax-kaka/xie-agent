@@ -1,0 +1,10 @@
+node_modules/
+reference/
+.agents/
+.codex/
+.test-*/
+会话/
+.会话/
+*.bun-build
+dist/xie-agent/*.exe
+*.log

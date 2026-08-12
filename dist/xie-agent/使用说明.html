@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>xie-agent 使用说明 v0.9</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --card:#1c2029; --border:#2a2f3a; --text:#e6e8ee; --muted:#9aa3b2; --accent:#7c9cff; --accent2:#5ad1b0; --warn:#ffb454; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; line-height:1.75; padding:40px 20px; }
+  .wrap { max-width:900px; margin:0 auto; }
+  h1 { font-size:26px; margin-bottom:4px; }
+  .sub { color:var(--muted); margin-bottom:26px; }
+  h2 { font-size:19px; margin:36px 0 12px; padding-left:12px; border-left:4px solid var(--accent); }
+  p { margin-bottom:10px; }
+  code { background:#232a3a; padding:1px 7px; border-radius:5px; font-family:Consolas,monospace; font-size:12.5px; color:var(--accent2); }
+  pre { background:#10131a; border:1px solid var(--border); border-radius:10px; padding:14px 16px; font-family:Consolas,monospace; font-size:12.5px; overflow-x:auto; line-height:1.65; color:#c3cad8; margin:10px 0 14px; }
+  table { width:100%; border-collapse:collapse; margin:10px 0 16px; font-size:13px; }
+  th { text-align:left; color:var(--muted); font-weight:600; padding:7px 10px; border-bottom:2px solid var(--border); white-space:nowrap; }
+  td { padding:7px 10px; border-bottom:1px solid #22262f; vertical-align:top; }
+  tr:hover td { background:#1a1e27; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; margin:12px 0; }
+  .card b { color:var(--accent2); }
+  .callout { border-left:3px solid var(--warn); background:#221d12; padding:10px 14px; border-radius:0 8px 8px 0; margin:12px 0; font-size:13.5px; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:20px; font-size:11px; font-weight:600; margin-right:4px; }
+  .b-ai { background:#143a2f; color:var(--accent2); }
+  .b-no { background:#232a3a; color:var(--muted); }
+  .footer { margin-top:40px; color:var(--muted); font-size:12.5px; text-align:center; border-top:1px solid var(--border); padding-top:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>📖 xie-agent 使用说明</h1>
+<div class="sub">小说写作 CLI Agent · v0.9 · 中英双语命令 · AI 意图路由/工具调用 · 交互对齐 opencode</div>
+
+<h2>快速开始(3 分钟)</h2>
+<div class="card">
+<pre>cd D:\我的小说目录
+D:\xie-agent\xie.exe        ← 运行(或直接双击)
+
+xie> /init(初始化) 万古神帝          ← 初始化作品
+xie> /config(配置) 密钥 sk-xxx        ← 配置模型(或设置环境变量 DEEPSEEK_API_KEY)
+xie> /write(写作)                    ← 进入写作向导,选择器逐章配置后 AI 写作
+xie> 主角在城门口遇到宿敌      ← 或直接输入文字,AI 写作并自动保存</pre>
+<p>管理类操作不需 key;写作需配置 API Key(/模型 一路向导),未配时会提示并引导。
+旧版作品的英文目录(章节/char(人物)/scene(场景)…)启动时会自动迁移为中文,无需手动处理。</p>
+</div>
+
+<h2>写作向导(推荐)</h2>
+<pre>📖 要写几章?(默认 1): 3
+📄 第 1 章:
+  标题(回车 = 第1章): 废柴觉醒
+  登场人物(选择器:↑↓ 移动,空格 选中,回车 确定):
+    ▶ [x] 林晚 — 黑发剑客,外冷内热
+      [ ] 沈无涯 — 白衣书生
+      (无)          ＋ 新建…
+  场景(选择器:空格/回车 选择):
+    ▶ 宗门大殿      直接描述新场景(临时)    ＋ 新建…
+  剧情大纲(回车 = AI 自动写): 林晚与宿敌对峙,发现玉佩线索
+📋 确认: … 开始写作?[y/N]: y
+✍️  开始写作 3 章…  ✅ 完成 → D:\…\章节\001.md</pre>
+<ul>
+<li><b>人物选择器</b>:空格 选中/取消,回车 确定;输入文字即过滤;按 <code>h</code> 隐藏/显示当前项;
+按 <code>d</code> 两次删除当前项;选「＋ 新建…」可当场创建(人物默认可见)</li>
+<li><b>场景选择器</b>:空格/回车 单选;可选「直接描述新场景(临时,不保存)」或「＋ 新建…」;
+新建场景默认隐藏(创建时询问可见性)</li>
+<li><b>每章约 3000 字</b>(±500 合格,剧情合理优先),不足 2500 自动补写</li>
+<li><b>每次保存都提示文件路径</b>,可直接打开微调</li>
+</ul>
+
+<h2>命令手册(23 个,无参数 = 操作菜单,括号内为英文别名,均可用)</h2>
+<table>
+<tr><th>命令</th><th>用途</th><th>AI</th></tr>
+<tr><td><code>/write(写作) [指令] [--n N] [--from N] [--new 标题]</code></td><td>写作:无参数=向导;--n 3 批量写 3 章;--from 从第 N 章起;--new 开新章;<code>;;</code> 分隔逐章指令</td><td><span class="badge b-ai">AI</span></td></tr>
+<tr><td><code>直接输入文字</code></td><td>AI 写作并保存到当前章节;可写 <code>[查:关键词]</code> 自动检索全文</td><td><span class="badge b-ai">AI</span></td></tr>
+<tr><td><code>/char(人物) 列表/查看/添加/生成/修改/隐藏/显示/删除</code></td><td>人物管理;<code>生成 描述</code> = AI 迭代生成;隐藏=不出现在候选列表但可搜索选中</td><td><span class="badge b-ai">生成</span></td></tr>
+<tr><td><code>/scene(场景) 列表/查看/添加/生成/修改/隐藏/显示/删除</code></td><td>场景管理(持久场景存 场景/,临时场景不保存);新场景默认隐藏</td><td><span class="badge b-ai">生成</span></td></tr>
+<tr><td><code>/world(世界观) 列表/查看/添加/生成/修改/删除</code></td><td>世界观条目</td><td><span class="badge b-ai">生成</span></td></tr>
+<tr><td><code>/style(风格) 查看/设置/提炼</code></td><td>风格管理;<code>提炼 样章</code> = AI 从样章提炼风格指南(调教文风核心)</td><td><span class="badge b-ai">提炼</span></td></tr>
+<tr><td><code>/outline(大纲) 查看/添加</code></td><td>大纲;<code>添加 第N章 标题:内容</code> 定义章节大纲,批量写作按此写每章</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/time(时间线) 查看/添加/推进</code></td><td>剧情时间线 + 当前时间点(写入 novel.json,注入写作)</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/growth(成长) 查看/添加</code></td><td>主角成长记录</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/vault(伏笔) 列表/添加/关闭</code></td><td>伏笔台账(未回收伏笔自动提醒 AI 铺垫,防提前揭露)</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/idea(灵感) 内容/列表</code></td><td>灵感库</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/chapter(章节) 列表/新建/定位</code></td><td>章节管理(新建/定位当前章)</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/check(检查) [--deep]</code></td><td>一致性检查:规则引擎(时间线/vault(伏笔)/元数据);--deep 加 AI 深度校验(人设/时间/战力)</td><td><span class="badge b-ai">--deep</span></td></tr>
+<tr><td><code>/reader(读者)</code></td><td>AI 模拟读者:毒点/节奏/断章反馈</td><td><span class="badge b-ai">AI</span></td></tr>
+<tr><td><code>/summary(摘要) 生成/查看/全部</code></td><td>卷摘要(每 10 章一卷):AI 浓缩本卷剧情,写作自动注入防遗忘</td><td><span class="badge b-ai">生成</span></td></tr>
+<tr><td><code>/search(搜索) 关键词</code></td><td>全文检索(哪个词出现在哪几章)</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/export(导出) [md/txt]</code></td><td>导出全书</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/stats(统计)</code></td><td>字数统计(全书/各章)</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/config(配置) 查看/供应商/model(模型)/密钥/style(风格)</code></td><td>模型与风格配置</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/model(模型)</code></td><td>交互式配置:选提供商/模型 → API Key → 进阶参数(temperature/top_p/reasoning_effort) → 测试连接</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/continue(继续)</code> 或 <code>xie.exe -c</code></td><td>继续工作:回顾上次会话 + 续跑中断的批量写作(断点续写,不重复)</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/help(帮助) [命令]</code></td><td>帮助;<code>/help(帮助) 写作</code> 看详细用法示例</td><td><span class="badge b-no">本地</span></td></tr>
+<tr><td><code>/quit(退出)</code></td><td>退出(Ctrl+C 连按两次也行)</td><td><span class="badge b-no">本地</span></td></tr>
+</table>
+<h2>AI 意图路由(不输命令也能干活)</h2>
+<div class="card">
+<p>不输入命令、直接说人话时,AI 会识别你的意图并调用对应工具,回车确认后执行:</p>
+<pre>xie> 帮我新建一个角色            → 识别为:新建角色 → 回车执行 → 补齐名字/设定 → 创建
+xie> 把林晚改成冷艳型            → 识别为:修改角色 → AI 迭代修改或直接重写
+xie> 帮我新建一个场景 青州雪夜    → 场景创建流程
+xie> 让主角在城门口遇到敌人      → 写作指令,直接开写</pre>
+<p>底层是一套工具调用(参考 opencode):读文件/写文件/列目录 + 人物/场景/世界观/大纲/伏笔等操作,由模型决定调哪个;无 key 时回退关键词识别。</p>
+</div>
+
+
+
+<h2>可见性与删除(互动管理)</h2>
+<div class="card">
+<ul>
+<li><b>可见性</b>:人物默认可见,场景默认隐藏(创建时询问);隐藏 = 不在候选列表出现,
+但选择器里输入名字仍可选中。命令:<code>/char(人物) 隐藏 林晚</code>、<code>/char(人物) 显示 林晚</code>、
+<code>/scene(场景) 隐藏|显示 &lt;名&gt;</code>;选择器内按 <code>h</code> 快速切换</li>
+<li><b>删除</b>:<code>/char(人物) 删除 &lt;名&gt;</code>、<code>/scene(场景) 删除 &lt;名&gt;</code>、
+<code>/world(世界观) 删除 &lt;名&gt;</code>(需 y 确认,不可恢复);选择器内按 <code>d</code> 两次删除当前项</li>
+<li><b>存储</b>:可见性保存在 novel.json 的 picker 字段,不污染 Markdown 档案;
+已写进章节正文的人名/场景名不会被改动</li>
+</ul>
+</div>
+
+<h2>AI 迭代生成</h2>
+<div class="card">
+<pre>xie> /char(人物) 生成 冷面剑客,皇室护卫,为复仇流浪
+🔍 AI 生成人物档案(第 1 轮)…  [草稿展示]
+满意吗?[y=保存 / n=放弃 / 输入修改意见继续迭代]: 再冷酷一点,话少
+🔍 AI 生成人物档案(第 2 轮)…  [按意见重生成]
+满意吗?[y=保存 / n=放弃 / 输入修改意见继续迭代]: y
+✅ 已保存人物档案
+📄 微调:F:\…\人物\冷面剑客.md</pre>
+<p>人物/scene(场景)/世界观通用。不满意就一直给意见,直到满意才保存;n 放弃不落盘。</p>
+</div>
+
+<h2>模型配置</h2>
+<table>
+<tr><th>项</th><th>位置</th><th>说明</th></tr>
+<tr><td>provider</td><td><code>/config(配置) provider deepseek</code></td><td>deepseek / openai / ollama / zhipu(OpenAI 兼容接口)</td></tr>
+<tr><td>model</td><td><code>/config(配置) model deepseek-v4-flash</code></td><td>模型名,如 deepseek-v4-pro 可换</td></tr>
+<tr><td>apiKey</td><td><code>/config(配置) api-key</code> 或环境变量</td><td>环境变量名:&lt;PROVIDER&gt;_API_KEY,如 DEEPSEEK_API_KEY</td></tr>
+<tr><td>temperature</td><td>novel.json <code>model.temperature</code> 或 <code>/config(配置) temperature &lt;0-2&gt;</code></td><td>不配则任务默认:写作 0.9 / 校验 0.3 / 读者 0.8;对写作风格影响大,可在 <code>/model(模型)</code> 进阶选项微调</td></tr>
+<tr><td>top_p</td><td>novel.json <code>model.topP</code> 或 <code>/config(配置) top-p &lt;0-1&gt;</code></td><td>不配则不发送,用提供商默认;<code>/model(模型)</code> 进阶选项可设</td></tr>
+<tr><td>reasoning_effort</td><td>novel.json <code>model.reasoningEffort</code> 或 <code>/config(配置) reasoning-effort &lt;low|medium|high|off&gt;</code></td><td>不配则不发送;reasoning 模型的思考程度,可在 <code>/model(模型)</code> 进阶选项切换</td></tr>
+<tr><td>maxTokens</td><td>novel.json <code>model.maxTokens</code></td><td>默认 8000,足够一章 3000 字</td></tr>
+<tr><td>style</td><td><code>/config(配置) style 快节奏爽文</code> 或 风格.md</td><td>每次写作注入的风格描述</td></tr>
+</table>
+
+<h2>作品目录结构(全部 Markdown,改完即时生效)</h2>
+<pre>my-novel/
+├── novel.json       ← 元数据 + 模型配置 + 可见性(手改有效)
+├── 风格.md          ← 写作风格
+├── 大纲/总纲.md     ← 总纲 + 章节大纲(第N章 标题:内容)
+├── 场景/            ← 持久场景
+├── 人物/            ← 人物档案
+├── 世界观/          ← 世界观条目
+├── 摘要/            ← 卷摘要(vol1.md …)
+├── 时间线.md        ← 时间线      伏笔.md ← 伏笔
+├── 成长.md          ← 成长        章节/   ← 章节正文
+└── 笔记/idea(灵感).md     ← 灵感        .会话/   ← 会话记录</pre>
+
+<h2>FAQ</h2>
+<div class="callout"><b>没配 key 能用吗?</b> 管理类操作(人物/场景/大纲…)可以;写作需 key,/模型 会引导配置。</div>
+<div class="callout"><b>写出的章节在哪?</b> 章节/ 目录;每次保存都会提示完整路径,直接打开微调。</div>
+<div class="callout"><b>AI 忘了早期剧情?</b> 每写完 10 章跑一次 <code>/summary(摘要) 生成</code>,卷摘要会自动注入后续写作。</div>
+<div class="callout"><b>批量写一半断了?</b> 重新运行 <code>xie.exe -c</code>,自动续写剩余章节。</div>
+<div class="callout"><b>换一本书?</b> 换目录运行即可,一个目录一部作品,互不干扰。</div>
+<div class="callout"><b>旧版作品会坏吗?</b> 不会,启动时自动把英文目录/文件迁移为中文。</div>
+
+<h2>终端操作提示</h2>
+<div class="card">
+<ul>
+<li>AI 写作中显示旋转指示器 + 任务文案;按 Esc 一次提示「再按 Esc 打断」,5 秒内再按一次才真正中断</li>
+<li>Ctrl+C:按一次提示,3 秒内连按两次才退出(防误触)</li>
+<li>输入 <code>/</code> 开头时,下方实时显示命令候选列表</li>
+<li>输入 <code>/</code> 后候选列表纵向显示;↑/↓ 选择候选,Tab 轮转补全命令名
+(输入 <code>/写</code> 后按 Tab 直接补成 <code>/write(写作)</code>,继续按 Tab 轮转)</li>
+<li>命令后按空格,下方显示该命令用法提示;上下方向键翻看输入历史</li>
+<li>向导选择器:↑/↓ 移动,空格 选择,回车 确定,Esc 取消,输入 过滤,h 隐藏/显示,d 删除(连按确认)</li>
+</ul>
+</div>
+
+<div class="footer">xie-agent v0.7 · 2026-08-12 · 有问题把报错发回来</div>
+</div>
+</body>
+</html>
