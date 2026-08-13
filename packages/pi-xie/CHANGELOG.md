@@ -5,6 +5,7 @@
 ### Added
 
 - Added fullscreen transcript search with `Ctrl+Shift+F`, incremental match highlighting, configurable search match theme colors, and next/previous navigation with `Enter`/`Ctrl+G` and `Shift+Enter`/`Ctrl+Shift+G`.
+- Added a project-scoped `/破甲` command that makes the unrestricted system-prompt block opt-in (off by default) and takes effect on the next session.
 - Added built-in toggleable writing rules for novel projects via the `/规则` command, with per-rule enable/disable persisted per project.
 - Added experimental strict JSON-schema constrained sampling for the default `read`, `bash`, `edit`, and `write` tools under `PI_EXPERIMENTAL=1`.
 - Added a fullscreen exit output setting to choose between printing the final transcript and only a session resume hint.

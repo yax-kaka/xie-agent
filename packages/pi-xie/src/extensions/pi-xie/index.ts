@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { isArmorBreakEnabled, setArmorBreakEnabled } from "../../core/armor-break.ts";
 import type {
 	AgentToolResult,
 	ExtensionAPI,
@@ -33,6 +35,7 @@ import {
 import {
 	getEffectiveStyleText,
 	getEffectiveWritingRules,
+	parseEnabledState,
 	parseRuleToggleArgs,
 	resolveRuleId,
 	setWritingRuleEnabled,
@@ -127,6 +130,21 @@ const ReadChapterSchema = Type.Object({
 const EmptySchema = Type.Object({});
 
 export default function piXieExtension(pi: ExtensionAPI): void {
+	pi.registerEntryRenderer<{ text: string }>("system-prompt-preview", (entry, _options, theme) => {
+		const text = entry.data?.text ?? "";
+		return new Text(theme.fg("dim", `[系统提示词预览]\n${text}`), 0, 0);
+	});
+
+	let systemPromptShown = false;
+	pi.on("session_start", () => {
+		systemPromptShown = false;
+	});
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (systemPromptShown || ctx.mode !== "tui") return;
+		systemPromptShown = true;
+		pi.appendEntry<{ text: string }>("system-prompt-preview", { text: event.systemPrompt });
+	});
+
 	pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
 		if (!mutatingTools.has(event.toolName)) return undefined;
 		if (!ctx.hasUI) return undefined;
@@ -498,6 +516,28 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	};
 	pi.registerCommand("规则", { description: "切换写作规则开关", handler: rulesHandler });
 	pi.registerCommand("rules", { description: "Toggle writing rules", handler: rulesHandler });
+
+	const armorHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		const trimmed = args.trim();
+		let enabled: boolean | undefined;
+		if (trimmed) {
+			enabled = parseEnabledState(trimmed);
+			if (enabled === undefined) {
+				ctx.ui.notify("用法：/破甲 <开|关|on|off|1|0|true|false>，或直接 /破甲", "warning");
+				return;
+			}
+		} else {
+			const current = isArmorBreakEnabled(ctx.cwd);
+			const onLabel = `开启${current ? "（当前）" : ""}`;
+			const offLabel = `关闭${current ? "" : "（当前）"}`;
+			const state = await ctx.ui.select("破甲模式", [onLabel, offLabel]);
+			if (!state) return;
+			enabled = state === onLabel;
+		}
+		setArmorBreakEnabled(ctx.cwd, enabled);
+		ctx.ui.notify(`破甲模式：${enabled ? "开启" : "关闭"}。请新开一个会话（/new 或重启 pi-xie）后生效。`, "info");
+	};
+	pi.registerCommand("破甲", { description: "切换系统提示词破甲模式", handler: armorHandler });
 
 	pi.registerCommand("manuscript", {
 		description: "Rebuild manuscript.txt from chapter files",

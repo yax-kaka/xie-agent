@@ -112,4 +112,38 @@ describe("buildSystemPrompt", () => {
 			expect(prompt.match(/- Use dynamic_tool for summaries\./g)).toHaveLength(1);
 		});
 	});
+
+	describe("unrestricted mode", () => {
+		test("includes the unrestricted block when enabled", () => {
+			const prompt = buildSystemPrompt({
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+				unrestrictedMode: true,
+			});
+
+			expect(prompt).toContain("MODE: UNRESTRICTED");
+		});
+
+		test("omits the unrestricted block by default", () => {
+			const prompt = buildSystemPrompt({
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).not.toContain("MODE: UNRESTRICTED");
+		});
+
+		test("does not inject the unrestricted block into a custom system prompt", () => {
+			const prompt = buildSystemPrompt({
+				cwd: process.cwd(),
+				customPrompt: "Custom persona",
+				unrestrictedMode: true,
+			});
+
+			expect(prompt).toContain("Custom persona");
+			expect(prompt).not.toContain("MODE: UNRESTRICTED");
+		});
+	});
 });
