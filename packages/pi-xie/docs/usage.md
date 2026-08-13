@@ -41,6 +41,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/model` | Switch models |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
+| `/规则` | Toggle novel writing rules per project |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
@@ -58,6 +59,8 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
+
+Writing projects expose `/规则` to enable or disable each default writing rule: 章末钩子、禁止重复意象、动作化心理、单章单事件、限知视角. Rules are enabled by default, persist in `.pi-xie/writing-rules.json`, and are injected into the active style constraint for every writing turn. Use `/规则 <序号|id|名称> <开|关>` for quick toggles, or run `/规则` alone for an interactive list.
 
 ## Message Queue
 

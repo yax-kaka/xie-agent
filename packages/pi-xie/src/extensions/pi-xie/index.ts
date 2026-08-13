@@ -9,8 +9,10 @@ import type {
 	ToolCallEvent,
 } from "../../core/extensions/index.ts";
 import {
+	type ActivePremises,
 	createEntity,
 	deleteEntity,
+	type EntityKind,
 	ensureWorkspace,
 	getActive,
 	getEntity,
@@ -21,15 +23,20 @@ import {
 	readConstraint,
 	rebuildManuscript,
 	rewriteChapter,
-	selectPremises,
 	saveSnapshot,
+	selectPremises,
 	undoLast,
 	updateEntity,
 	writeChapter,
 	writeConstraint,
-	type ActivePremises,
-	type EntityKind,
 } from "./workspace.ts";
+import {
+	getEffectiveStyleText,
+	getEffectiveWritingRules,
+	parseRuleToggleArgs,
+	resolveRuleId,
+	setWritingRuleEnabled,
+} from "./writing-rules.ts";
 
 const textResult = (text: string): AgentToolResult<unknown> => ({
 	content: [{ type: "text", text }],
@@ -241,7 +248,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 				worldview: readConstraint(ctx.cwd, "worldview"),
 				outline: readConstraint(ctx.cwd, "outline"),
 				timeline: readConstraint(ctx.cwd, "timeline"),
-				style: readConstraint(ctx.cwd, "style"),
+				style: getEffectiveStyleText(ctx.cwd),
 			};
 			const chapters = listChapters(ctx.cwd).map((chapter) => ({
 				number: chapter.number,
@@ -252,7 +259,15 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 				.map((chapter) => ({ number: chapter.number, file: chapter.file, content: chapter.content }));
 			return textResult(
 				JSON.stringify(
-					{ active, characters, scenes, constraints, chapters, manuscriptPath: getManuscriptPath(ctx.cwd), previousChapters },
+					{
+						active,
+						characters,
+						scenes,
+						constraints,
+						chapters,
+						manuscriptPath: getManuscriptPath(ctx.cwd),
+						previousChapters,
+					},
 					null,
 					2,
 				),
@@ -282,7 +297,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		description: "Read the current writing style.",
 		parameters: EmptySchema,
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
-			return textResult(readConstraint(ctx.cwd, "style"));
+			return textResult(getEffectiveStyleText(ctx.cwd));
 		},
 	});
 
@@ -390,59 +405,99 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		style: "风格",
 	} as const;
 	for (const constraint of ["worldview", "outline", "timeline", "style"] as const) {
-		const handler = async (args: string, ctx: ExtensionCommandContext) => {
-				ensureWorkspace(ctx.cwd);
-				const current = readConstraint(ctx.cwd, constraint);
-				const next = await ctx.ui.editor(`${constraint} constraint`, current);
-				if (next !== undefined) {
-					writeConstraint(ctx.cwd, constraint, next);
-					ctx.ui.notify(`Saved ${constraint}`, "info");
-				}
-			};
+		const handler = async (_args: string, ctx: ExtensionCommandContext) => {
+			ensureWorkspace(ctx.cwd);
+			const current = readConstraint(ctx.cwd, constraint);
+			const next = await ctx.ui.editor(`${constraint} constraint`, current);
+			if (next !== undefined) {
+				writeConstraint(ctx.cwd, constraint, next);
+				ctx.ui.notify(`Saved ${constraint}`, "info");
+			}
+		};
 		pi.registerCommand(constraint, { description: `Edit ${constraint}`, handler });
 		pi.registerCommand(constraintAliases[constraint], { description: `Edit ${constraint}`, handler });
 	}
 
 	const premiseHandler = async (_args: string, ctx: ExtensionCommandContext) => {
-			ensureWorkspace(ctx.cwd);
-			const characters = listEntities(ctx.cwd, "characters");
-			const scenes = listEntities(ctx.cwd, "scenes");
-			const characterChoice = await ctx.ui.select(
-				"Select main character",
-				characters.map((entity) => `${entity.id} - ${entity.name}`),
-			);
-			const sceneChoice = await ctx.ui.select(
-				"Select main scene",
-				scenes.map((entity) => `${entity.id} - ${entity.name}`),
-			);
-			const active: ActivePremises = {
-				characters: characterChoice ? [characterChoice.split(" - ")[0]] : [],
-				scenes: sceneChoice ? [sceneChoice.split(" - ")[0]] : [],
-			};
-			selectPremises(ctx.cwd, active);
-			ctx.ui.notify("Updated active premises", "info");
+		ensureWorkspace(ctx.cwd);
+		const characters = listEntities(ctx.cwd, "characters");
+		const scenes = listEntities(ctx.cwd, "scenes");
+		const characterChoice = await ctx.ui.select(
+			"Select main character",
+			characters.map((entity) => `${entity.id} - ${entity.name}`),
+		);
+		const sceneChoice = await ctx.ui.select(
+			"Select main scene",
+			scenes.map((entity) => `${entity.id} - ${entity.name}`),
+		);
+		const active: ActivePremises = {
+			characters: characterChoice ? [characterChoice.split(" - ")[0]] : [],
+			scenes: sceneChoice ? [sceneChoice.split(" - ")[0]] : [],
 		};
+		selectPremises(ctx.cwd, active);
+		ctx.ui.notify("Updated active premises", "info");
+	};
 	pi.registerCommand("premise", { description: "Select active character/scene premises", handler: premiseHandler });
 	pi.registerCommand("前提", { description: "Select active character/scene premises", handler: premiseHandler });
 
 	const writeHandler = async (args: string, ctx: ExtensionCommandContext) => {
-			const instruction = args.trim() || (await ctx.ui.input("What should I write?"));
-			if (!instruction) return;
-			if (!ctx.isIdle()) {
-				ctx.ui.notify("Agent is busy", "warning");
-				return;
-			}
-			pi.sendUserMessage(instruction);
-		};
+		const instruction = args.trim() || (await ctx.ui.input("What should I write?"));
+		if (!instruction) return;
+		if (!ctx.isIdle()) {
+			ctx.ui.notify("Agent is busy", "warning");
+			return;
+		}
+		pi.sendUserMessage(instruction);
+	};
 	pi.registerCommand("write", { description: "Ask the agent to write a chapter", handler: writeHandler });
 	pi.registerCommand("写作", { description: "Ask the agent to write a chapter", handler: writeHandler });
 
 	const undoHandler = async (_args: string, ctx: ExtensionCommandContext) => {
-			const snapshot = undoLast(ctx.cwd);
-			ctx.ui.notify(snapshot ? `Undid ${snapshot.action}` : "Nothing to undo", "info");
-		};
+		const snapshot = undoLast(ctx.cwd);
+		ctx.ui.notify(snapshot ? `Undid ${snapshot.action}` : "Nothing to undo", "info");
+	};
 	pi.registerCommand("undo", { description: "Undo last writing-tool change", handler: undoHandler });
 	pi.registerCommand("撤销", { description: "Undo last writing-tool change", handler: undoHandler });
+
+	const rulesHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		ensureWorkspace(ctx.cwd);
+		const trimmed = args.trim();
+		if (trimmed) {
+			const parsed = parseRuleToggleArgs(trimmed);
+			if (!parsed) {
+				ctx.ui.notify("用法：/规则 <序号|id|名称> <开|关>，或直接 /规则", "warning");
+				return;
+			}
+			const id = resolveRuleId(parsed.target);
+			if (!id) {
+				ctx.ui.notify(`未知规则：${parsed.target}`, "error");
+				return;
+			}
+			const result = setWritingRuleEnabled(ctx.cwd, id, parsed.enabled);
+			if (result) {
+				ctx.ui.notify(`${result.rule.name}：${result.enabled ? "已开启" : "已关闭"}`, "info");
+			}
+			return;
+		}
+
+		for (;;) {
+			const effective = getEffectiveWritingRules(ctx.cwd);
+			const options = effective.map(
+				(item, index) => `${index + 1}. ${item.rule.name} [${item.enabled ? "开" : "关"}]`,
+			);
+			const selected = await ctx.ui.select("写作规则开关", options);
+			if (!selected) break;
+			const index = Number(selected.split(".")[0]) - 1;
+			const item = effective[index];
+			if (!item) continue;
+			const state = await ctx.ui.select("设置状态", ["开启", "关闭"]);
+			if (!state) continue;
+			setWritingRuleEnabled(ctx.cwd, item.rule.id, state === "开启");
+			ctx.ui.notify(`${item.rule.name}：${state}`, "info");
+		}
+	};
+	pi.registerCommand("规则", { description: "切换写作规则开关", handler: rulesHandler });
+	pi.registerCommand("rules", { description: "Toggle writing rules", handler: rulesHandler });
 
 	pi.registerCommand("manuscript", {
 		description: "Rebuild manuscript.txt from chapter files",
