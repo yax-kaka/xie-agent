@@ -43,7 +43,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/settings` | Thinking level, theme, message delivery, transport |
 | `/规则` | Toggle novel writing rules per project |
 | `/破甲` | Toggle the unrestricted system-prompt block per project (new session required) |
-| `/permissions` | Toggle auto-approval for chapter writes/rewrites per project |
+| `/permissions` | Toggle auto-approval for writing mutations per project |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
@@ -66,7 +66,7 @@ Writing projects expose `/规则` to enable or disable each default writing rule
 
 `/破甲` toggles an optional system-prompt block off by default and persists the choice in `.pi-xie/armor.json`. Because the base system prompt is built when a session starts, the change takes effect after starting a new session (`/new` or restarting pi-xie).
 
-`/permissions` toggles auto-approval for `write_chapter` and `rewrite_chapter`, so the agent can write without a per-tool confirmation prompt. It persists in `.pi-xie/permissions.json` and takes effect immediately.
+`/permissions` toggles auto-approval for the writing tools that mutate the project (chapters, entities, constraints, undo), so the agent can make changes without a per-tool confirmation prompt. It persists in `.pi-xie/permissions.json` and takes effect immediately.
 
 ## Message Queue
 

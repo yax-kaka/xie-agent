@@ -61,8 +61,6 @@ const mutatingTools = new Set([
 	"undo_last",
 ]);
 
-const autoWriteTools = new Set(["write_chapter", "rewrite_chapter"]);
-
 function entityKind(value: "character" | "scene"): EntityKind {
 	return value === "character" ? "characters" : "scenes";
 }
@@ -151,7 +149,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
 		if (!mutatingTools.has(event.toolName)) return undefined;
 		if (!ctx.hasUI) return undefined;
-		if (autoWriteTools.has(event.toolName) && isAutoWriteEnabled(ctx.cwd)) return undefined;
+		if (isAutoWriteEnabled(ctx.cwd)) return undefined;
 		const summary = JSON.stringify(event.input).slice(0, 200);
 		const ok = await ctx.ui.confirm(`Run ${event.toolName}?`, summary || "(no arguments)");
 		if (!ok) return { block: true, reason: "User cancelled" };
@@ -568,10 +566,13 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			enabled = state === onLabel;
 		}
 		setAutoWriteEnabled(ctx.cwd, enabled);
-		ctx.ui.notify(`章节写入：${enabled ? "自动（无需确认）" : "手动（每次确认）"}`, "info");
+		ctx.ui.notify(`自动模式：${enabled ? "所有写入/修改免确认" : "手动（每次确认）"}`, "info");
 	};
-	pi.registerCommand("permissions", { description: "切换章节写入权限（自动/手动）", handler: permissionsHandler });
-	pi.registerCommand("权限", { description: "切换章节写入权限（自动/手动）", handler: permissionsHandler });
+	pi.registerCommand("permissions", {
+		description: "切换自动授权（所有写入/修改免确认）",
+		handler: permissionsHandler,
+	});
+	pi.registerCommand("权限", { description: "切换自动授权（所有写入/修改免确认）", handler: permissionsHandler });
 
 	pi.registerCommand("manuscript", {
 		description: "Rebuild manuscript.txt from chapter files",
