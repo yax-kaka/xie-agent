@@ -10,6 +10,7 @@ import type {
 	ExtensionContext,
 	ToolCallEvent,
 } from "../../core/extensions/index.ts";
+import { isAutoWriteEnabled, setAutoWriteEnabled } from "./permissions.ts";
 import {
 	type ActivePremises,
 	createEntity,
@@ -59,6 +60,8 @@ const mutatingTools = new Set([
 	"rewrite_chapter",
 	"undo_last",
 ]);
+
+const autoWriteTools = new Set(["write_chapter", "rewrite_chapter"]);
 
 function entityKind(value: "character" | "scene"): EntityKind {
 	return value === "character" ? "characters" : "scenes";
@@ -148,6 +151,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
 		if (!mutatingTools.has(event.toolName)) return undefined;
 		if (!ctx.hasUI) return undefined;
+		if (autoWriteTools.has(event.toolName) && isAutoWriteEnabled(ctx.cwd)) return undefined;
 		const summary = JSON.stringify(event.input).slice(0, 200);
 		const ok = await ctx.ui.confirm(`Run ${event.toolName}?`, summary || "(no arguments)");
 		if (!ok) return { block: true, reason: "User cancelled" };
@@ -538,6 +542,36 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		ctx.ui.notify(`破甲模式：${enabled ? "开启" : "关闭"}。请新开一个会话（/new 或重启 pi-xie）后生效。`, "info");
 	};
 	pi.registerCommand("破甲", { description: "切换系统提示词破甲模式", handler: armorHandler });
+
+	const permissionsHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		const trimmed = args.trim();
+		let enabled: boolean | undefined;
+		if (trimmed) {
+			const lower = trimmed.toLowerCase();
+			if (lower === "自动" || lower === "auto") {
+				enabled = true;
+			} else if (lower === "手动" || lower === "manual") {
+				enabled = false;
+			} else {
+				enabled = parseEnabledState(trimmed);
+			}
+			if (enabled === undefined) {
+				ctx.ui.notify("用法：/permissions <自动|手动|开|关|on|off|1|0|true|false>，或直接 /permissions", "warning");
+				return;
+			}
+		} else {
+			const current = isAutoWriteEnabled(ctx.cwd);
+			const onLabel = `自动写入${current ? "（当前）" : ""}`;
+			const offLabel = `手动确认${current ? "" : "（当前）"}`;
+			const state = await ctx.ui.select("权限控制", [onLabel, offLabel]);
+			if (!state) return;
+			enabled = state === onLabel;
+		}
+		setAutoWriteEnabled(ctx.cwd, enabled);
+		ctx.ui.notify(`章节写入：${enabled ? "自动（无需确认）" : "手动（每次确认）"}`, "info");
+	};
+	pi.registerCommand("permissions", { description: "切换章节写入权限（自动/手动）", handler: permissionsHandler });
+	pi.registerCommand("权限", { description: "切换章节写入权限（自动/手动）", handler: permissionsHandler });
 
 	pi.registerCommand("manuscript", {
 		description: "Rebuild manuscript.txt from chapter files",
