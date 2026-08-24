@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added persistent `/noai` and `/人脑` manual writing modes with save feedback and a live chapter preview; each submitted line is saved without calling AI.
 - Added fullscreen transcript search with `Ctrl+Shift+F`, incremental match highlighting, configurable search match theme colors, and next/previous navigation with `Enter`/`Ctrl+G` and `Shift+Enter`/`Ctrl+Shift+G`.
 - Added a project-scoped `/permissions` command for auto-approving writing mutations without per-tool confirmation.
 - Added a project-scoped `/破甲` command that makes the unrestricted system-prompt block opt-in (off by default) and takes effect on the next session.

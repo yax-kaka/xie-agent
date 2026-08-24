@@ -53,6 +53,7 @@ novel/
 - `/worldview`, `/outline`, `/timeline`, `/style` - edit constraints
 - `/premise` - select the active character/scene combination
 - `/write` - ask the agent to write a chapter
+- `/noai`, `/人脑` - toggle continuous manual writing mode with a live chapter preview; each submitted line is saved without calling AI
 - `/manuscript` - rebuild `manuscript.txt` from chapter files
 - `/undo` - revert the last writing-tool change
 

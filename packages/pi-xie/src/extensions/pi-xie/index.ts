@@ -135,15 +135,81 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		const text = entry.data?.text ?? "";
 		return new Text(theme.fg("dim", `[系统提示词预览]\n${text}`), 0, 0);
 	});
+	pi.registerEntryRenderer<{ chapter: string; text: string }>("noai-writing", (entry, _options, theme) => {
+		const chapter = entry.data?.chapter ?? "";
+		const text = entry.data?.text ?? "";
+		return new Text(`${theme.fg("accent", `[人脑写作 · ${chapter}]`)}\n${text}`, 0, 0);
+	});
 
 	let systemPromptShown = false;
-	pi.on("session_start", () => {
+	let noAiChapter: { cwd: string; file: string } | undefined;
+	const clearNoAiUi = (ctx: ExtensionContext) => {
+		ctx.ui.setStatus("noai", undefined);
+		ctx.ui.setWidget("noai-chapter", undefined);
+	};
+	const updateNoAiUi = (ctx: ExtensionContext, file: string) => {
+		const chapter = readChapter(ctx.cwd, file);
+		const content = chapter.content.trimEnd();
+		const lines = content ? content.split(/\r?\n/) : [];
+		const visibleLines = lines.slice(-12);
+		const hiddenLineCount = lines.length - visibleLines.length;
+		ctx.ui.setStatus("noai", `人脑模式：${file}`);
+		ctx.ui.setWidget(
+			"noai-chapter",
+			[
+				`[人脑模式 · ${file} · ${content.length} 字]`,
+				...(hiddenLineCount > 0 ? [`… 已省略前 ${hiddenLineCount} 行`] : []),
+				...visibleLines,
+				"[/noai：退出模式或新建下一章]",
+			],
+			{ placement: "aboveEditor" },
+		);
+		return chapter;
+	};
+	pi.on("session_start", (_event, ctx) => {
 		systemPromptShown = false;
+		noAiChapter = undefined;
+		clearNoAiUi(ctx);
 	});
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (systemPromptShown || ctx.mode !== "tui") return;
 		systemPromptShown = true;
 		pi.appendEntry<{ text: string }>("system-prompt-preview", { text: event.systemPrompt });
+	});
+	pi.on("input", async (event, ctx) => {
+		if (!noAiChapter || event.source !== "interactive") return { action: "continue" };
+		if (noAiChapter.cwd !== ctx.cwd) {
+			noAiChapter = undefined;
+			clearNoAiUi(ctx);
+			return { action: "continue" };
+		}
+
+		try {
+			const chapter = readChapter(ctx.cwd, noAiChapter.file);
+			const previousContent = chapter.content;
+			const trimmedContent = previousContent.trimEnd();
+			const nextContent = trimmedContent ? `${trimmedContent}\n${event.text}` : event.text;
+			saveSnapshot(ctx.cwd, {
+				toolCallId: "command:noai-input",
+				action: "rewrite",
+				path: chapter.path,
+				oldContent: previousContent,
+			});
+			const rewritten = rewriteChapter(ctx.cwd, nextContent, chapter.file);
+			pi.appendEntry<{ chapter: string; text: string }>("noai-writing", {
+				chapter: chapter.file,
+				text: event.text,
+			});
+			updateNoAiUi(ctx, chapter.file);
+			ctx.ui.notify(`已写入 ${chapter.file}（${rewritten.content.trimEnd().length} 字）`, "info");
+		} catch (error) {
+			ctx.ui.notify(`写入章节失败：${error instanceof Error ? error.message : String(error)}`, "error");
+			return { action: "handled" };
+		}
+		if (event.images && event.images.length > 0) {
+			ctx.ui.notify("人脑模式只写入文字，图片已忽略", "warning");
+		}
+		return { action: "handled" };
 	});
 
 	pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
@@ -471,6 +537,64 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	};
 	pi.registerCommand("write", { description: "Ask the agent to write a chapter", handler: writeHandler });
 	pi.registerCommand("写作", { description: "Ask the agent to write a chapter", handler: writeHandler });
+
+	const noAiHandler = async (_args: string, ctx: ExtensionCommandContext) => {
+		if (!ctx.isIdle()) {
+			ctx.ui.notify("Agent is busy", "warning");
+			return;
+		}
+
+		const enterChapter = (file: string) => {
+			noAiChapter = { cwd: ctx.cwd, file };
+			updateNoAiUi(ctx, file);
+			ctx.ui.notify(`已进入人脑模式，当前章节：${file}`, "info");
+		};
+		const createChapter = () => {
+			const chapter = writeChapter(ctx.cwd, "");
+			saveSnapshot(ctx.cwd, {
+				toolCallId: "command:noai",
+				action: "write",
+				path: chapter.path,
+				oldContent: null,
+			});
+			enterChapter(chapter.file);
+		};
+
+		if (noAiChapter?.cwd === ctx.cwd) {
+			const exitAction = "退出人脑模式";
+			const newChapterAction = "新建下一章";
+			const action = await ctx.ui.select("人脑模式", [exitAction, newChapterAction]);
+			if (action === exitAction) {
+				noAiChapter = undefined;
+				clearNoAiUi(ctx);
+				ctx.ui.notify("已退出人脑模式", "info");
+			} else if (action === newChapterAction) {
+				createChapter();
+			}
+			return;
+		}
+
+		const chapters = listChapters(ctx.cwd);
+		const newChapterAction = "新建下一章";
+		const continueChapterAction = "续写已有章节";
+		const action = await ctx.ui.select(
+			"进入人脑模式",
+			chapters.length > 0 ? [newChapterAction, continueChapterAction] : [newChapterAction],
+		);
+		if (!action) return;
+		if (action === newChapterAction) {
+			createChapter();
+			return;
+		}
+		const selected = await ctx.ui.select(
+			"选择要续写的章节",
+			chapters.map((chapter) => chapter.file),
+		);
+		if (!selected) return;
+		enterChapter(selected);
+	};
+	pi.registerCommand("noai", { description: "切换持续人脑写作模式（不调用 AI）", handler: noAiHandler });
+	pi.registerCommand("人脑", { description: "切换持续人脑写作模式（不调用 AI）", handler: noAiHandler });
 
 	const undoHandler = async (_args: string, ctx: ExtensionCommandContext) => {
 		const snapshot = undoLast(ctx.cwd);
