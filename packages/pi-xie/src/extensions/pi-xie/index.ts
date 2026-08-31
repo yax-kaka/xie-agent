@@ -151,14 +151,18 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		const chapter = readChapter(ctx.cwd, file);
 		const content = chapter.content.trimEnd();
 		const lines = content ? content.split(/\r?\n/) : [];
-		const visibleLines = lines.slice(-12);
+		// Extension widgets render at most 10 lines (InteractiveMode.MAX_WIDGET_LINES).
+		// Budget: header (1) + omitted marker (1) + chapter tail + footer (1), so show the
+		// newest 7 lines when older lines are omitted, otherwise all lines (up to 8).
+		const needsOmission = lines.length > 8;
+		const visibleLines = needsOmission ? lines.slice(-7) : lines;
 		const hiddenLineCount = lines.length - visibleLines.length;
 		ctx.ui.setStatus("noai", `人脑模式：${file}`);
 		ctx.ui.setWidget(
 			"noai-chapter",
 			[
 				`[人脑模式 · ${file} · ${content.length} 字]`,
-				...(hiddenLineCount > 0 ? [`… 已省略前 ${hiddenLineCount} 行`] : []),
+				...(needsOmission ? [`… 已省略前 ${hiddenLineCount} 行`] : []),
 				...visibleLines,
 				"[/noai：退出模式或新建下一章]",
 			],

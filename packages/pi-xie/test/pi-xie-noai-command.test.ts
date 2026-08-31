@@ -113,6 +113,29 @@ describe("pi-xie /noai command", () => {
 		expect(sendUserMessage).not.toHaveBeenCalled();
 	});
 
+	test("keeps the newest chapter lines visible in the widget when the chapter exceeds the widget budget", async () => {
+		const { commands, inputHandler, runtime } = await loadExtension();
+		runtime.appendEntry = vi.fn();
+		const { context, select, setWidget } = createCommandContext();
+		select.mockResolvedValueOnce("新建下一章");
+		await commands.get("noai")?.handler("", context);
+
+		for (let index = 1; index <= 10; index++) {
+			expect(await inputHandler(input(`第${index}段`), context)).toEqual({ action: "handled" });
+		}
+
+		const widget = setWidget.mock.calls.at(-1)?.[1] as string[] | undefined;
+		expect(widget).toBeDefined();
+		expect(widget!.length).toBeLessThanOrEqual(10);
+		expect(widget![0]).toContain("[人脑模式 · 001.md ·");
+		expect(widget![1]).toBe("… 已省略前 3 行");
+		// The newest lines stay visible; the oldest fall off.
+		expect(widget).toContain("第4段");
+		expect(widget).toContain("第10段");
+		expect(widget).not.toContain("第1段");
+		expect(widget!.at(-1)).toBe("[/noai：退出模式或新建下一章]");
+	});
+
 	test("starts a new chapter without leaving manual mode", async () => {
 		const { commands, inputHandler, runtime } = await loadExtension();
 		runtime.appendEntry = vi.fn();
