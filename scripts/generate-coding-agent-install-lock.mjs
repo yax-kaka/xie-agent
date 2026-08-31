@@ -259,7 +259,7 @@ function createRootLockEntry(installerPackageJson) {
 	return sortedPackageEntry(entry);
 }
 
-function validateGeneratedFiles(installerPackageJson, installLock, internalNames) {
+function validateGeneratedFiles(installerPackageJson, installLock, internalNames, internalWorkspaces) {
 	const errors = [];
 	const rootEntry = installLock.packages[""];
 	const includedPackageNames = new Set();
@@ -294,8 +294,13 @@ function validateGeneratedFiles(installerPackageJson, installLock, internalNames
 		if (entry.dev || entry.devOptional || entry.extraneous) {
 			errors.push(`${lockPath || "root"} contains dev/extraneous metadata`);
 		}
-		if (packageName?.startsWith(internalPackagePrefix) && entry.version !== installerPackageJson.version) {
-			errors.push(`${lockPath} internal package version ${entry.version} does not match ${installerPackageJson.version}`);
+		if (packageName?.startsWith(internalPackagePrefix)) {
+			const workspaceVersion = internalWorkspaces.get(packageName)?.packageJson.version;
+			if (workspaceVersion !== undefined && entry.version !== workspaceVersion) {
+				errors.push(
+					`${lockPath} internal package version ${entry.version} does not match workspace version ${workspaceVersion}`,
+				);
+			}
 		}
 		if (entry.hasInstallScript) {
 			if (!packageName || !entry.version) {
@@ -365,6 +370,14 @@ function generateInstallLock() {
 	const codingAgentPackage = readJson(join(codingAgentDir, "package.json"));
 	const installerPackageJson = createInstallerPackageJson(codingAgentPackage);
 	const internalWorkspaces = getInternalWorkspaces(lockPackages);
+	// The app package itself is the installer's primary dependency. It is not matched
+	// by internalPackagePrefix when renamed (e.g. pi-xie), so register it explicitly.
+	if (!internalWorkspaces.has(codingAgentPackage.name)) {
+		internalWorkspaces.set(codingAgentPackage.name, {
+			lockPath: join("packages", codingAgentPackage.name),
+			packageJson: codingAgentPackage,
+		});
+	}
 	const installLockPackages = {
 		"": createRootLockEntry(installerPackageJson),
 	};
@@ -399,7 +412,7 @@ function generateInstallLock() {
 		packages: sortedObject(installLockPackages),
 	};
 
-	validateGeneratedFiles(installerPackageJson, installLock, internalNames);
+	validateGeneratedFiles(installerPackageJson, installLock, internalNames, internalWorkspaces);
 	return { installerPackageJson, installLock };
 }
 

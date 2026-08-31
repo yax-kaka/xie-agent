@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export type EntityKind = "characters" | "scenes";
@@ -302,20 +302,24 @@ function parseManuscriptBlocks(text: string): Array<{ number: number; block: str
 	const blocks: Array<{ number: number; block: string }> = [];
 	const headerPattern = /第(\d+)章\n\n/g;
 	const matches: Array<{ index: number; header: string; number: number }> = [];
-	let match: RegExpExecArray | null;
-	while ((match = headerPattern.exec(text)) !== null) {
+	for (;;) {
+		const match = headerPattern.exec(text);
+		if (match === null) break;
 		matches.push({ index: match.index, header: match[0], number: Number(match[1]) });
 	}
 	for (let index = 0; index < matches.length; index++) {
 		const start = matches[index].index + matches[index].header.length;
 		const end = index + 1 < matches.length ? matches[index + 1].index : text.length;
 		const content = text.slice(start, end).replace(/^\n+|\n+$/g, "");
-		blocks.push({ number: matches[index].number, block: chapterBlock({
+		blocks.push({
 			number: matches[index].number,
-			file: "",
-			path: "",
-			content,
-		}) });
+			block: chapterBlock({
+				number: matches[index].number,
+				file: "",
+				path: "",
+				content,
+			}),
+		});
 	}
 	return blocks;
 }
@@ -352,7 +356,10 @@ export function syncManuscript(cwd: string, chapter: ChapterInfo, mode: "append"
 		return path;
 	}
 
-	if (mode === "append" && (current.length === 0 || chapter.number > Math.max(...current.map((entry) => entry.number)))) {
+	if (
+		mode === "append" &&
+		(current.length === 0 || chapter.number > Math.max(...current.map((entry) => entry.number)))
+	) {
 		writeFileSync(path, readFileSync(path, "utf8").replace(/\n+$/, "") + "\n\n" + chapterBlock(chapter));
 		return path;
 	}

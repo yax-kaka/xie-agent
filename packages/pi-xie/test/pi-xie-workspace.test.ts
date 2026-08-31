@@ -1,6 +1,6 @@
 import { mkdtempSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
 	createEntity,
@@ -8,11 +8,11 @@ import {
 	getActive,
 	getManuscriptPath,
 	listChapters,
-	rebuildManuscript,
 	readConstraint,
+	rebuildManuscript,
 	rewriteChapter,
-	selectPremises,
 	saveSnapshot,
+	selectPremises,
 	undoLast,
 	updateEntity,
 	writeChapter,
@@ -64,7 +64,12 @@ describe("pi-xie workspace", () => {
 		expect(first.number).toBe(1);
 		expect(listChapters(cwd)).toHaveLength(1);
 
-		saveSnapshot(cwd, { toolCallId: "t1", action: "rewrite", path: first.path, oldContent: readFileSync(first.path, "utf8") });
+		saveSnapshot(cwd, {
+			toolCallId: "t1",
+			action: "rewrite",
+			path: first.path,
+			oldContent: readFileSync(first.path, "utf8"),
+		});
 		rewriteChapter(cwd, "Chapter one rewritten.", "1");
 		expect(readFileSync(first.path, "utf8")).toContain("rewritten");
 
@@ -75,7 +80,7 @@ describe("pi-xie workspace", () => {
 
 	test("maintains manuscript.txt with append and replace", () => {
 		const first = writeChapter(cwd, "Chapter one text.");
-		const second = writeChapter(cwd, "Chapter two text.");
+		writeChapter(cwd, "Chapter two text.");
 
 		const manuscript = readFileSync(getManuscriptPath(cwd), "utf8");
 		expect(manuscript).toContain("第1章\n\nChapter one text.");
