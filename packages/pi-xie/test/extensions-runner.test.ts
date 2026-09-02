@@ -75,6 +75,7 @@ describe("ExtensionRunner", () => {
 		sendMessage: () => {},
 		sendUserMessage: () => {},
 		appendEntry: () => {},
+		runSubAgent: async () => undefined,
 		setSessionName: () => {},
 		getSessionName: () => undefined,
 		setLabel: () => {},

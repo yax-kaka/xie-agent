@@ -105,6 +105,7 @@ import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader }
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import { runSubAgent } from "./sub-agent.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
@@ -2390,6 +2391,17 @@ export class AgentSession {
 					if (entry) {
 						this._emit({ type: "entry_appended", entry });
 					}
+				},
+				runSubAgent: (options) => {
+					const model = options.model ?? this.model;
+					if (!model) return Promise.resolve(undefined);
+					return runSubAgent(this._modelRuntime, {
+						systemPrompt: options.systemPrompt,
+						messages: options.messages,
+						model,
+						maxTokens: options.maxTokens,
+						signal: options.signal ?? this.agent.signal,
+					});
 				},
 				setSessionName: (name) => {
 					this.setSessionName(name);

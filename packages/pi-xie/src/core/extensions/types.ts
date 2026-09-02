@@ -1317,6 +1317,14 @@ export interface ExtensionAPI {
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
+	/**
+	 * Run a single-turn, tool-free sub-agent with an isolated system prompt and
+	 * messages. The sub-agent shares the session model runtime but sees none of
+	 * the session history or tools. Returns the assistant text, or undefined
+	 * when aborted or empty.
+	 */
+	runSubAgent(options: RunSubAgentOptions): Promise<string | undefined>;
+
 	// =========================================================================
 	// Session Metadata
 	// =========================================================================
@@ -1566,6 +1574,19 @@ export type SendUserMessageHandler = (
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
+export interface RunSubAgentOptions {
+	systemPrompt: string;
+	/** User messages for the sub-agent turn. Earlier dialogue is embedded as text. */
+	messages: Array<{ role: "user"; content: string }>;
+	/** Defaults to the session model when omitted. */
+	model?: Model<Api>;
+	/** Optional cap for the sub-agent response; the provider's own output limit applies when omitted. */
+	maxTokens?: number;
+	signal?: AbortSignal;
+}
+
+export type RunSubAgentHandler = (options: RunSubAgentOptions) => Promise<string | undefined>;
+
 export type SetSessionNameHandler = (name: string) => void;
 
 export type GetSessionNameHandler = () => string | undefined;
@@ -1628,6 +1649,7 @@ export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
+	runSubAgent: RunSubAgentHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;
 	setLabel: SetLabelHandler;
