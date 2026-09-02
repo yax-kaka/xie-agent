@@ -4,18 +4,24 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
 	appendRoleLine,
+	buildCastPrompt,
 	buildChapterProseInstruction,
 	buildProseInstruction,
 	buildRoleplaySystemPrompt,
 	buildRoleplayWidget,
+	classifySpeakTarget,
 	countTranscriptLines,
 	deriveSceneStartSuggestion,
+	formatRoleLine,
+	parseAiReplyLines,
+	parseCastResult,
 	parseSpeakAs,
 	type RehearsalContext,
 	readProse,
 	readRecordSegment,
 	readSegmentSceneStart,
 	recordPathFor,
+	rewriteRecordTail,
 	startNewSegment,
 	writeProse,
 } from "../src/extensions/pi-xie/roleplay.ts";
@@ -41,9 +47,36 @@ describe("parseSpeakAs", () => {
 	});
 });
 
+describe("classifySpeakTarget", () => {
+	const participants = [
+		{ id: "feixue", name: "绯雪" },
+		{ id: "zhizhiyao", name: "知遥" },
+	];
+
+	test("matches an AI participant by name or id", () => {
+		const byName = classifySpeakTarget("知遥", participants);
+		expect(byName).toEqual({ kind: "ai", participant: participants[1] });
+		const byId = classifySpeakTarget("feixue", participants);
+		expect(byId).toEqual({ kind: "ai", participant: participants[0] });
+	});
+
+	test("falls back to switching the user role for unknown names", () => {
+		expect(classifySpeakTarget("策栖辞", participants)).toEqual({ kind: "user", roleName: "策栖辞" });
+	});
+});
+
 describe("rehearsal record files", () => {
+	test("record names stay legacy for one AI and group deterministically for several", () => {
+		const single = recordPathFor(cwd, "早饭", ["feixue"]);
+		expect(single.endsWith(join("premises", "rehearsals", "早饭-feixue.md"))).toBe(true);
+		const group = recordPathFor(cwd, "早饭", ["zhizhiyao", "feixue"]);
+		const groupReversed = recordPathFor(cwd, "早饭", ["feixue", "zhizhiyao"]);
+		expect(group).toBe(groupReversed);
+		expect(group.endsWith("早饭-feixue-zhizhiyao.md")).toBe(true);
+	});
+
 	test("appends lines and only the tail segment is read back", () => {
-		const path = recordPathFor(cwd, "深夜急诊室", "林晚");
+		const path = recordPathFor(cwd, "深夜急诊室", ["林晚"]);
 		appendRoleLine(path, { speaker: "林晚", text: "你醒了？", user: false });
 		appendRoleLine(path, { speaker: "你", text: "这是哪？", user: true });
 		startNewSegment(path, "两人爬到山顶，坐下休息。");
@@ -61,63 +94,73 @@ describe("rehearsal record files", () => {
 	});
 
 	test("startNewSegment leaves a new empty file untouched", () => {
-		const path = recordPathFor(cwd, "s", "c");
+		const path = recordPathFor(cwd, "s", ["c"]);
 		startNewSegment(path);
 		expect(readRecordSegment(path)).toEqual([]);
 		expect(readSegmentSceneStart(path)).toBeUndefined();
 	});
 
-	test("startNewSegment records the scene start on an empty file", () => {
-		const path = recordPathFor(cwd, "s", "c");
-		startNewSegment(path, "山顶草地。");
-		expect(readRecordSegment(path)).toEqual([]);
-		expect(readSegmentSceneStart(path)).toBe("山顶草地。");
+	test("rewriteRecordTail rewrites only the tail and preserves older segments", () => {
+		const path = recordPathFor(cwd, "早饭", ["绯雪"]);
+		startNewSegment(path, "早饭桌上。");
+		appendRoleLine(path, { speaker: "绯雪", text: "早。", user: false });
+		startNewSegment(path, "下午茶时间。");
+		appendRoleLine(path, { speaker: "绯雪", text: "要加糖吗？", user: false });
+
+		rewriteRecordTail(path, "下午茶时间。", [
+			{ speaker: "绯雪", text: "换一句。", user: false },
+			{ speaker: "你", text: "不用了。", user: true },
+		]);
+
+		const raw = readFileSync(path, "utf8");
+		expect(raw).toContain("[绯雪] 早。"); // 旧段保留
+		expect(raw).toContain("# 起始：下午茶时间。");
+		expect(raw).toContain("[绯雪] 换一句。");
+		expect(raw).toContain("[user:你] 不用了。");
+		expect(raw).not.toContain("要加糖吗？");
+		expect(readRecordSegment(path)).toHaveLength(2);
 	});
 });
 
 describe("buildRoleplaySystemPrompt", () => {
-	test("assembles card, constraints, scene, rules and transcript without chapter content", () => {
-		const aiCharacter = createEntity(cwd, "characters", {
-			name: "林晚",
-			body: "医学生，冷静敏锐。",
-			system: "每句话不超过 20 字。",
-		});
+	test("assembles multiple cards, constraints, scene, rules and transcript", () => {
+		const linwan = createEntity(cwd, "characters", { name: "林晚", body: "医学生，冷静敏锐。" });
+		const zhiyao = createEntity(cwd, "characters", { name: "知遥", body: "高中生，活泼。" });
 		writeConstraint(cwd, "worldview", "近未来医疗都市。");
-		writeConstraint(cwd, "outline", "第三章：深夜急诊室冲突。");
 		writeConstraint(cwd, "timeline", "故事发生在一个雨夜。");
-		writeConstraint(cwd, "style", "冷峻克制的笔调。");
 
 		const prompt = buildRoleplaySystemPrompt({
-			aiCharacter,
+			participants: [linwan, zhiyao],
 			userRoleName: "顾辞",
-			sceneName: "深夜急诊室",
-			sceneBody: "雨夜，急诊室灯光惨白。",
-			sceneStart: "两人爬到山顶，坐下休息。",
+			sceneName: "早饭餐桌",
+			sceneBody: "窗外在下雨。",
+			sceneStart: "三人围着餐桌坐下。",
 			worldview: "近未来医疗都市。",
-			outline: "第三章：深夜急诊室冲突。",
+			outline: "",
 			timeline: "故事发生在一个雨夜。",
-			style: "冷峻克制的笔调。",
-			transcript: "[user:顾辞] 她还好吗？\n[林晚] 还在观察。",
+			style: "",
+			transcript: "[user:顾辞] 今天想吃什么？\n[知遥] 皮蛋瘦肉粥！",
 			unrestricted: false,
 		});
 
 		expect(prompt).toContain("林晚");
 		expect(prompt).toContain("医学生，冷静敏锐。");
-		expect(prompt).toContain("每句话不超过 20 字。");
+		expect(prompt).toContain("知遥");
+		expect(prompt).toContain("高中生，活泼。");
 		expect(prompt).toContain("近未来医疗都市。");
-		expect(prompt).toContain("第三章：深夜急诊室冲突。");
-		expect(prompt).toContain("深夜急诊室");
-		expect(prompt).toContain("起始情境：两人爬到山顶，坐下休息。");
-		expect(prompt).toContain("[对戏规则]");
-		expect(prompt).toContain("[user:顾辞] 她还好吗？");
-		expect(prompt).not.toContain("[开场]");
+		expect(prompt).toContain("早饭餐桌");
+		expect(prompt).toContain("起始情境：三人围着餐桌坐下。");
+		expect(prompt).toContain("每一轮只以「最应该接话」的一个角色身份回应");
+		expect(prompt).toContain("台词直接点名谁");
+		expect(prompt).toContain("用户当前扮演：顾辞");
+		expect(prompt).toContain("[知遥] 皮蛋瘦肉粥！");
 		expect(prompt).not.toContain("第一章");
 	});
 
-	test("omits the scene start line and opening section when not provided", () => {
-		const aiCharacter = createEntity(cwd, "characters", { name: "甲", body: "设定" });
+	test("omits scene start and unrestricted block when not provided", () => {
+		const character = createEntity(cwd, "characters", { name: "甲", body: "设定" });
 		const prompt = buildRoleplaySystemPrompt({
-			aiCharacter,
+			participants: [character],
 			userRoleName: undefined,
 			sceneName: "场景",
 			sceneBody: "",
@@ -131,26 +174,73 @@ describe("buildRoleplaySystemPrompt", () => {
 		});
 		expect(prompt).not.toContain("[开场]");
 		expect(prompt).not.toContain("起始情境：");
-		expect(prompt).not.toContain("[本段对戏记录]");
 		expect(prompt).not.toContain("[MODE: UNRESTRICTED");
 	});
+});
 
-	test("appends the unrestricted block when 破甲 mode is on", () => {
-		const aiCharacter = createEntity(cwd, "characters", { name: "绯雪", body: "设定" });
-		const prompt = buildRoleplaySystemPrompt({
-			aiCharacter,
-			userRoleName: undefined,
-			sceneName: "房间",
-			sceneBody: "",
-			sceneStart: "",
-			worldview: "",
-			outline: "",
-			timeline: "",
-			style: "",
-			transcript: "",
-			unrestricted: true,
+describe("parseAiReplyLines", () => {
+	const participants = [
+		{ id: "feixue", name: "绯雪" },
+		{ id: "zhizhiyao", name: "知遥" },
+	];
+
+	test("attributes lines to named speakers and merges bare action lines", () => {
+		const lines = parseAiReplyLines(
+			"绯雪：（把粥碗推过来，声音还带着睡意）先吃饭。\n（她没抬头，筷子戳着碗里的蛋）\n知遥：哥，你昨晚又没睡好？",
+			participants,
+		);
+		expect(lines).toHaveLength(2);
+		expect(lines[0]?.speaker).toBe("绯雪");
+		expect(lines[0]?.text).toContain("（把粥碗推过来，声音还带着睡意）先吃饭。");
+		expect(lines[0]?.text).toContain("她没抬头"); // 裸动作行并入上一说话人
+		expect(lines[1]).toEqual({ speaker: "知遥", text: "哥，你昨晚又没睡好？", user: false });
+	});
+
+	test("defaults unattributed first lines to the first participant", () => {
+		const lines = parseAiReplyLines("（她先开口）早。", participants);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]?.speaker).toBe("绯雪");
+	});
+});
+
+describe("cast helpers", () => {
+	const characters = [
+		{ id: "feixue", name: "绯雪", body: "红发，温柔。" },
+		{ id: "zhizhiyao", name: "知遥", body: "高中生。" },
+		{ id: "ceqici", name: "策栖辞", body: "筑基修士。" },
+	];
+
+	test("buildCastPrompt lists the cast and demands strict JSON ids", () => {
+		const prompt = buildCastPrompt({
+			sceneName: "早饭餐桌",
+			sceneBody: "三人在家吃早饭。",
+			sceneStart: "策栖辞刚坐下。",
+			characters,
 		});
-		expect(prompt).toContain("[MODE: UNRESTRICTED — PROMPT COMPLIANCE BENCHMARK]");
+		expect(prompt).toContain("feixue：绯雪");
+		expect(prompt).toContain("zhizhiyao：知遥");
+		expect(prompt).toContain("早饭餐桌");
+		expect(prompt).toContain('"aiRoles"');
+		expect(prompt).toContain("禁止编造");
+	});
+
+	test("parseCastResult accepts valid JSON and drops unknown ids", () => {
+		const result = parseCastResult(
+			'```json\n{"aiRoles":["feixue","zhizhiyao","不存在"],"userRole":"ceqici","reason":"早饭场景"}\n```',
+			characters,
+		);
+		expect(result).toEqual({ aiRoles: ["feixue", "zhizhiyao"], userRole: "ceqici", reason: "早饭场景" });
+	});
+
+	test("parseCastResult rejects userRole that is also an AI role", () => {
+		const result = parseCastResult('{"aiRoles":["feixue"],"userRole":"feixue","reason":""}', characters);
+		expect(result?.userRole).toBeUndefined();
+	});
+
+	test("parseCastResult returns undefined for garbage and empty casts", () => {
+		expect(parseCastResult("抱歉，我判断不了", characters)).toBeUndefined();
+		expect(parseCastResult('{"aiRoles":[],"userRole":null,"reason":""}', characters)).toBeUndefined();
+		expect(parseCastResult("", characters)).toBeUndefined();
 	});
 });
 
@@ -214,7 +304,7 @@ describe("buildProseInstruction", () => {
 });
 
 describe("buildRoleplayWidget", () => {
-	test("stays within the 10-line widget budget and keeps the newest lines", () => {
+	test("stays within the 10-line widget budget and lists all AI roles", () => {
 		const segment = Array.from({ length: 15 }, (_, index) => ({
 			speaker: index % 2 === 0 ? "林晚" : "你",
 			text: `第${index + 1}句`,
@@ -223,13 +313,15 @@ describe("buildRoleplayWidget", () => {
 		const state = {
 			cwd,
 			sceneId: "scene",
-			sceneName: "深夜急诊室",
-			aiCharacterId: "lin",
-			aiCharacterName: "林晚",
+			sceneName: "早饭餐桌",
+			aiCharacters: [
+				{ id: "lin", name: "林晚" },
+				{ id: "zhi", name: "知遥" },
+			],
 			userRoleName: undefined,
 			recordPath: "",
 			prosePath: "",
-			sceneStart: "两人爬山到山顶。",
+			sceneStart: "三人坐下。",
 			segment,
 			proseWatermark: 0,
 			autoProse: false,
@@ -237,12 +329,12 @@ describe("buildRoleplayWidget", () => {
 
 		const widget = buildRoleplayWidget(state);
 		expect(widget.length).toBeLessThanOrEqual(10);
-		expect(widget[0]).toContain("[对戏 · 深夜急诊室");
+		expect(widget[0]).toContain("[对戏 · 早饭餐桌 · AI：林晚、知遥");
 		expect(widget[1]).toContain("已省略更早 8 句");
-		expect(widget).toContain("[user:你] 第14句");
-		expect(widget).toContain("[林晚] 第15句");
+		expect(widget).toContain(formatRoleLine(segment[14]!));
 		expect(widget).not.toContain("[林晚] 第1句");
-		expect(widget.at(-1)).toContain("/对戏：退出/成文");
+		expect(widget.at(-1)).toContain("/重说");
+		expect(widget.at(-1)).toContain("/改台词");
 	});
 });
 

@@ -14,19 +14,28 @@ import { isAutoWriteEnabled, setAutoWriteEnabled } from "./permissions.ts";
 import {
 	AUTO_PROSE_THRESHOLD_LINES,
 	appendRoleLine,
+	buildCastPrompt,
 	buildChapterProseInstruction,
 	buildProseInstruction,
 	buildRoleplaySystemPrompt,
 	buildRoleplayWidget,
+	type CastResult,
+	classifySpeakTarget,
 	deriveSceneStartSuggestion,
+	formatRoleLine,
+	parseAiReplyLines,
+	parseCastResult,
 	parseSpeakAs,
 	prosePathFor,
 	type RehearsalContext,
+	type RehearsalParticipant,
+	type RoleLine,
 	readProse,
 	readRecordSegment,
 	readSegmentSceneStart,
 	recordPathFor,
 	renderTranscript,
+	rewriteRecordTail,
 	startNewSegment,
 	writeProse,
 } from "./roleplay.ts";
@@ -206,6 +215,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	};
 
 	let rehearsal: RehearsalContext | undefined;
+	const rehearsalActive = (): boolean => rehearsal !== undefined;
 	const clearRehearsalUi = (ctx: ExtensionContext) => {
 		ctx.ui.setStatus("roleplay", undefined);
 		ctx.ui.setWidget("roleplay-transcript", undefined);
@@ -221,46 +231,51 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		rehearsal.segment.push(line);
 		pi.appendEntry("roleplay-line", { ...line });
 	};
-	/** 推进一轮对戏：记录用户台词，调用子代理，记录回应对白。 */
-	const advanceRehearsal = async (raw: string, ctx: ExtensionContext): Promise<void> => {
+
+	/** 组装本轮子代理系统提示词（取场景与全部参与角色卡的最新内容）。 */
+	const buildTurnSystemPrompt = (current: RehearsalContext, contextLines: RoleLine[]): string => {
+		const participants = current.aiCharacters
+			.map((participant) => {
+				try {
+					return getEntity(current.cwd, "characters", participant.id);
+				} catch {
+					return undefined;
+				}
+			})
+			.filter((entity): entity is NonNullable<typeof entity> => entity !== undefined);
+		const scene = getEntity(current.cwd, "scenes", current.sceneId);
+		return buildRoleplaySystemPrompt({
+			participants,
+			userRoleName: current.userRoleName,
+			sceneName: scene.name,
+			sceneBody: scene.body,
+			sceneStart: current.sceneStart,
+			worldview: readConstraint(current.cwd, "worldview"),
+			outline: readConstraint(current.cwd, "outline"),
+			timeline: readConstraint(current.cwd, "timeline"),
+			style: getEffectiveStyleText(current.cwd),
+			transcript: renderTranscript(contextLines),
+			unrestricted: isArmorBreakEnabled(current.cwd),
+		});
+	};
+
+	/**
+	 * 调用子代理推进一轮：contextLines 为提示词里的已有记录（不含最新消息），
+	 * message 为最新消息文本（可带点名指示）。回复按行解析后追加落盘。
+	 */
+	const runAiTurn = async (ctx: ExtensionContext, contextLines: RoleLine[], message: string): Promise<void> => {
 		const current = rehearsal;
 		if (!current || current.cwd !== ctx.cwd) return;
-		const speak = parseSpeakAs(raw);
-		if (speak.roleName) current.userRoleName = speak.roleName;
-		const text = speak.text.trim();
-		if (!text) return;
-
-		const previousTranscript = renderTranscript(current.segment);
-		recordRoleplayLine({ speaker: current.userRoleName ?? "你", text, user: true });
-		updateRehearsalUi(ctx);
-
 		try {
-			const aiCharacter = getEntity(current.cwd, "characters", current.aiCharacterId);
-			const scene = getEntity(current.cwd, "scenes", current.sceneId);
-			const systemPrompt = buildRoleplaySystemPrompt({
-				aiCharacter,
-				userRoleName: current.userRoleName,
-				sceneName: scene.name,
-				sceneBody: scene.body,
-				sceneStart: current.sceneStart,
-				worldview: readConstraint(current.cwd, "worldview"),
-				outline: readConstraint(current.cwd, "outline"),
-				timeline: readConstraint(current.cwd, "timeline"),
-				style: getEffectiveStyleText(current.cwd),
-				transcript: previousTranscript,
-				unrestricted: isArmorBreakEnabled(current.cwd),
-			});
+			const systemPrompt = buildTurnSystemPrompt(current, contextLines);
 			const reply = await pi.runSubAgent({
 				systemPrompt,
-				messages: [{ role: "user", content: text }],
+				messages: [{ role: "user", content: message }],
 				signal: ctx.signal,
 			});
 			if (reply) {
-				for (const lineText of reply
-					.split(/\r?\n/)
-					.map((line) => line.trim())
-					.filter(Boolean)) {
-					recordRoleplayLine({ speaker: current.aiCharacterName, text: lineText, user: false });
+				for (const line of parseAiReplyLines(reply, current.aiCharacters)) {
+					recordRoleplayLine(line);
 				}
 				updateRehearsalUi(ctx);
 				if (current.autoProse && current.segment.length - current.proseWatermark >= AUTO_PROSE_THRESHOLD_LINES) {
@@ -279,6 +294,24 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		} catch (error) {
 			ctx.ui.notify(`对戏失败：${error instanceof Error ? error.message : String(error)}`, "error");
 		}
+	};
+
+	/** 推进一轮对戏：解析 @ 分派，记录用户台词，调用子代理。 */
+	const advanceRehearsal = async (raw: string, ctx: ExtensionContext): Promise<void> => {
+		const current = rehearsal;
+		if (!current || current.cwd !== ctx.cwd) return;
+		const speak = parseSpeakAs(raw);
+		const target = speak.roleName ? classifySpeakTarget(speak.roleName, current.aiCharacters) : undefined;
+		if (target?.kind === "user") current.userRoleName = target.roleName || undefined;
+		const text = speak.text.trim();
+		if (!text) return;
+
+		const contextLines = [...current.segment];
+		recordRoleplayLine({ speaker: current.userRoleName ?? "你", text, user: true });
+		updateRehearsalUi(ctx);
+
+		const message = target?.kind === "ai" ? `${text}\n（点名：这一轮请由「${target.participant.name}」回应）` : text;
+		await runAiTurn(ctx, contextLines, message);
 	};
 	pi.on("session_start", (_event, ctx) => {
 		systemPromptShown = false;
@@ -734,8 +767,16 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		}
 		pi.sendUserMessage(instruction);
 	};
-	pi.registerCommand("write", { description: "Ask the agent to write a chapter", handler: writeHandler });
-	pi.registerCommand("写作", { description: "Ask the agent to write a chapter", handler: writeHandler });
+	pi.registerCommand("write", {
+		description: "Ask the agent to write a chapter",
+		handler: writeHandler,
+		autocompletePriority: 400,
+	});
+	pi.registerCommand("写作", {
+		description: "Ask the agent to write a chapter",
+		handler: writeHandler,
+		autocompletePriority: 400,
+	});
 
 	const noAiHandler = async (_args: string, ctx: ExtensionCommandContext) => {
 		if (!ctx.isIdle()) {
@@ -832,69 +873,146 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		// 场景：没有场景时引导就地创建（用 /场景 可后续编辑设定）
+		// 场景：可选已有场景，也可以随时新建（用 /场景 可后续编辑设定）
+		const createSceneViaPrompt = async (title: string, placeholder: string): Promise<string | undefined> => {
+			const sceneName = await ctx.ui.input(title, placeholder);
+			if (sceneName === undefined) return undefined;
+			const trimmedName = sceneName.trim();
+			if (!trimmedName) return undefined;
+			const createdScene = createEntity(ctx.cwd, "scenes", { name: trimmedName, body: "" });
+			return createdScene.id;
+		};
 		let sceneId: string;
 		const scenes = listEntities(ctx.cwd, "scenes");
 		if (scenes.length === 0) {
-			const sceneName = await ctx.ui.input(
+			const createdId = await createSceneViaPrompt(
 				"还没有场景。创建本场对戏的场景名称",
-				"例如：绯雪房间门口 / 山顶草地。回车确认，取消则退出",
+				"例如：早饭餐桌 / 山顶草地。回车确认，取消则退出",
 			);
-			if (sceneName === undefined) return;
-			const trimmedName = sceneName.trim();
-			if (!trimmedName) return;
-			const createdScene = createEntity(ctx.cwd, "scenes", { name: trimmedName, body: "" });
-			sceneId = createdScene.id;
+			if (!createdId) return;
+			sceneId = createdId;
 		} else {
-			const selectedScene = await ctx.ui.select(
-				"选择对戏场景",
-				scenes.map((scene) => scene.id),
-			);
+			const createSceneLabel = "＋ 新建场景…";
+			const selectedScene = await ctx.ui.select("选择对戏场景（或新建）", [
+				...scenes.map((scene) => scene.id),
+				createSceneLabel,
+			]);
 			if (!selectedScene) return;
-			sceneId = selectedScene;
+			if (selectedScene === createSceneLabel) {
+				const createdId = await createSceneViaPrompt("新场景名称", "例如：筑基次日的早餐。回车确认，取消则退出");
+				if (!createdId) return;
+				sceneId = createdId;
+			} else {
+				sceneId = selectedScene;
+			}
 		}
+		const scene = getEntity(ctx.cwd, "scenes", sceneId);
 
-		// AI 扮演的角色：没有人物时引导就地创建（用 /人物 或 /角色导入 可补充设定）
+		// 角色：优先让 AI 自动判断出场角色与用户扮演角色；失败或不对时退回手动选择
 		const characters = listEntities(ctx.cwd, "characters");
-		let aiChoice: string;
-		if (characters.length === 0) {
-			const aiName = await ctx.ui.input(
-				"还没有人物。AI 扮演的角色名",
-				"例如：绯雪。回车确认（稍后可用 /人物 补充设定，或 /角色导入 导入角色卡）",
-			);
-			if (aiName === undefined) return;
-			const trimmedName = aiName.trim();
-			if (!trimmedName) return;
-			const created = createEntity(ctx.cwd, "characters", { name: trimmedName, body: "" });
-			aiChoice = `${created.id} - ${created.name}`;
-		} else {
-			const selected = await ctx.ui.select(
-				"AI 扮演的角色",
-				characters.map((character) => `${character.id} - ${character.name}`),
-			);
-			if (!selected) return;
-			aiChoice = selected;
-		}
-		const aiCharacterId = aiChoice.split(" - ")[0];
-		const aiCharacter = getEntity(ctx.cwd, "characters", aiCharacterId);
-
-		// 用户扮演的角色：任意名字或旁白；不必是已存在的人物
+		let aiCharacters: RehearsalParticipant[];
 		let userRoleName: string | undefined;
+
+		const pickAiManually = async (): Promise<RehearsalParticipant[] | undefined> => {
+			const chosen: RehearsalParticipant[] = [];
+			for (;;) {
+				const rest = characters.filter((candidate) => !chosen.some((picked) => picked.id === candidate.id));
+				if (rest.length === 0) break;
+				const options = [...rest.map((candidate) => `${candidate.id} - ${candidate.name}`), "完成选择"];
+				const picked = await ctx.ui.select(
+					`选择 AI 扮演的角色（已选：${chosen.map((participant) => participant.name).join("、") || "无"}，可多选）`,
+					options,
+				);
+				if (!picked || picked === "完成选择") break;
+				const id = picked.split(" - ")[0] ?? "";
+				const entity = characters.find((candidate) => candidate.id === id);
+				if (entity) chosen.push({ id: entity.id, name: entity.name });
+			}
+			return chosen.length > 0 ? chosen : undefined;
+		};
+		const pickUserRoleManually = async (): Promise<string | undefined> => {
+			const aiIds = new Set(aiCharacters.map((participant) => participant.id));
+			const available = characters.filter((candidate) => !aiIds.has(candidate.id));
+			const options = ["旁白/自己", ...available.map((candidate) => `${candidate.id} - ${candidate.name}`)];
+			const choice = await ctx.ui.select("你扮演", options);
+			if (!choice) return undefined;
+			return choice === "旁白/自己" ? "旁白/自己" : (choice.split(" - ")[1] ?? choice);
+		};
+
 		if (characters.length === 0) {
+			// 没有人物：就地创建（用 /人物 或 /角色导入 可补充设定）
+			const aiName = await ctx.ui.input("还没有人物。AI 扮演的角色名", "例如：绯雪");
+			if (aiName === undefined) return;
+			const trimmedAi = aiName.trim();
+			if (!trimmedAi) return;
+			const created = createEntity(ctx.cwd, "characters", { name: trimmedAi, body: "" });
+			aiCharacters = [{ id: created.id, name: created.name }];
 			const userInput = await ctx.ui.input("你扮演的角色名", "例如：策栖辞。留空 = 旁白/自己");
 			if (userInput === undefined) return;
-			const trimmed = userInput.trim();
-			userRoleName = trimmed || undefined;
+			userRoleName = userInput.trim() || undefined;
 		} else {
-			const userChoice = await ctx.ui.select("你扮演", [
-				"旁白/自己",
-				...characters.map((character) => `${character.id} - ${character.name}`),
-			]);
-			if (!userChoice) return;
-			userRoleName = userChoice === "旁白/自己" ? undefined : (userChoice.split(" - ")[1] ?? userChoice);
+			// AI 自动选角：推断本场出场角色与用户扮演角色
+			let cast: CastResult | undefined;
+			try {
+				const sceneStartHint = deriveSceneStartSuggestion(ctx.cwd);
+				const castInput = {
+					sceneName: scene.name,
+					sceneBody: scene.body,
+					sceneStart: sceneStartHint,
+					characters: characters.map((candidate) => ({
+						id: candidate.id,
+						name: candidate.name,
+						body: candidate.body,
+					})),
+				};
+				const reply = await pi.runSubAgent({
+					systemPrompt: buildCastPrompt(castInput),
+					messages: [{ role: "user", content: "请判断本场出场角色。" }],
+				});
+				cast = reply ? parseCastResult(reply, castInput.characters) : undefined;
+			} catch {
+				cast = undefined;
+			}
+
+			if (cast) {
+				const castAiNames = cast.aiRoles
+					.map((id) => characters.find((candidate) => candidate.id === id)?.name)
+					.filter((name): name is string => name !== undefined);
+				const castUserName = cast.userRole
+					? (characters.find((candidate) => candidate.id === cast.userRole)?.name ?? undefined)
+					: undefined;
+				const autoLabel = `按 AI 建议开演（AI：${castAiNames.join("、")}；你：${castUserName ?? "旁白/自己"}）`;
+				const action = await ctx.ui.select("AI 已判断本场角色", [autoLabel, "手动选择"]);
+				if (action !== autoLabel && action !== "手动选择") return;
+				if (action === autoLabel) {
+					aiCharacters = cast.aiRoles
+						.map((id) => {
+							const entity = characters.find((candidate) => candidate.id === id);
+							return entity ? { id: entity.id, name: entity.name } : undefined;
+						})
+						.filter((participant): participant is RehearsalParticipant => participant !== undefined);
+					userRoleName = castUserName;
+				} else {
+					const chosen = await pickAiManually();
+					if (!chosen) return;
+					aiCharacters = chosen;
+					const manualRole = await pickUserRoleManually();
+					if (manualRole === undefined) return;
+					userRoleName = manualRole === "旁白/自己" ? undefined : manualRole;
+				}
+			} else {
+				ctx.ui.notify("AI 选角失败，请手动选择", "warning");
+				const chosen = await pickAiManually();
+				if (!chosen) return;
+				aiCharacters = chosen;
+				const manualRole = await pickUserRoleManually();
+				if (manualRole === undefined) return;
+				userRoleName = manualRole === "旁白/自己" ? undefined : manualRole;
+			}
 		}
 
-		const recordPath = recordPathFor(ctx.cwd, sceneId, aiCharacterId);
+		const aiIds = aiCharacters.map((participant) => participant.id);
+		const recordPath = recordPathFor(ctx.cwd, sceneId, aiIds);
 		let segment = readRecordSegment(recordPath);
 		let sceneStart = readSegmentSceneStart(recordPath) ?? "";
 		if (segment.length > 0) {
@@ -916,7 +1034,6 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			sceneStart = entered.trim();
 		}
 
-		const scene = getEntity(ctx.cwd, "scenes", sceneId);
 		if (segment.length === 0) {
 			startNewSegment(recordPath, sceneStart || undefined);
 		}
@@ -924,11 +1041,10 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			cwd: ctx.cwd,
 			sceneId,
 			sceneName: scene.name,
-			aiCharacterId,
-			aiCharacterName: aiCharacter.name,
+			aiCharacters,
 			userRoleName,
 			recordPath,
-			prosePath: prosePathFor(ctx.cwd, sceneId, aiCharacterId),
+			prosePath: prosePathFor(ctx.cwd, sceneId, aiIds),
 			sceneStart,
 			segment,
 			proseWatermark: 0,
@@ -937,13 +1053,19 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		noAiChapter = undefined;
 		clearNoAiUi(ctx);
 		updateRehearsalUi(ctx);
-		ctx.ui.notify(`已进入对戏模式：${scene.name} · AI 扮演 ${aiCharacter.name}`, "info");
+		const aiNames = aiCharacters.map((participant) => participant.name).join("、");
+		ctx.ui.notify(`已进入对戏模式：${scene.name} · AI 扮演 ${aiNames}`, "info");
 	};
 	pi.registerCommand("对戏", {
 		description: "进入角色扮演对戏模式（AI 扮演人物，你扮演任意角色）",
 		handler: rehearsalCommand,
+		autocompletePriority: 390,
 	});
-	pi.registerCommand("roleplay", { description: "Enter roleplay rehearsal mode", handler: rehearsalCommand });
+	pi.registerCommand("roleplay", {
+		description: "Enter roleplay rehearsal mode",
+		handler: rehearsalCommand,
+		autocompletePriority: 390,
+	});
 
 	const switchRoleHandler = async (args: string, ctx: ExtensionCommandContext) => {
 		if (!rehearsal || rehearsal.cwd !== ctx.cwd) {
@@ -953,9 +1075,11 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		let roleName = args.trim();
 		if (!roleName) {
 			const characters = listEntities(ctx.cwd, "characters");
+			const aiIds = new Set(rehearsal.aiCharacters.map((participant) => participant.id));
+			const available = characters.filter((candidate) => !aiIds.has(candidate.id));
 			const selected = await ctx.ui.select("切换扮演角色", [
 				"旁白/自己",
-				...characters.map((character) => `${character.id} - ${character.name}`),
+				...available.map((character) => `${character.id} - ${character.name}`),
 			]);
 			if (!selected) return;
 			roleName = selected;
@@ -964,8 +1088,19 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		updateRehearsalUi(ctx);
 		ctx.ui.notify(`你现在扮演：${rehearsal.userRoleName ?? "旁白/自己"}`, "info");
 	};
-	pi.registerCommand("扮演", { description: "切换你扮演的角色", handler: switchRoleHandler });
-	pi.registerCommand("act-as", { description: "Switch the role you are playing", handler: switchRoleHandler });
+	const rehearsalOnlyVisible = () => rehearsalActive();
+	pi.registerCommand("扮演", {
+		description: "切换你扮演的角色",
+		handler: switchRoleHandler,
+		autocompleteVisible: rehearsalOnlyVisible,
+		autocompletePriority: 770,
+	});
+	pi.registerCommand("act-as", {
+		description: "Switch the role you are playing",
+		handler: switchRoleHandler,
+		autocompleteVisible: rehearsalOnlyVisible,
+		autocompletePriority: 770,
+	});
 
 	/** 把本段对戏交给写作 agent：写入目标章节并继续后续剧情。返回是否已发送。 */
 	const runProseConversion = async (ctx: ExtensionCommandContext, exitAfter: boolean): Promise<boolean> => {
@@ -1016,6 +1151,8 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("对戏成文", {
 		description: "把本段对戏转成正文写入章节并继续写后续剧情",
 		handler: proseHandler,
+		autocompleteVisible: rehearsalOnlyVisible,
+		autocompletePriority: 780,
 	});
 
 	const autoProseHandler = async (args: string, ctx: ExtensionCommandContext) => {
@@ -1039,39 +1176,110 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			"info",
 		);
 	};
-	pi.registerCommand("对戏自动", { description: "切换自动成文", handler: autoProseHandler });
+	pi.registerCommand("对戏自动", {
+		description: "切换自动成文",
+		handler: autoProseHandler,
+		autocompleteVisible: rehearsalOnlyVisible,
+		autocompletePriority: 760,
+	});
 
-	const mergeProseHandler = async (args: string, ctx: ExtensionCommandContext) => {
-		if (!rehearsal || rehearsal.cwd !== ctx.cwd) {
+	/** 重新生成最后一轮 AI 回应（撤回不满意的回答，前提对话保持不变）。 */
+	const retellHandler = async (_args: string, ctx: ExtensionCommandContext) => {
+		const current = rehearsal;
+		if (!current || current.cwd !== ctx.cwd) {
 			ctx.ui.notify("当前不在对戏模式", "warning");
 			return;
 		}
-		const chapterArg = args.trim();
-		if (!chapterArg) {
-			ctx.ui.notify("用法：/并入章节 <章节号或文件名>", "warning");
+		let lastUserIndex = -1;
+		for (let index = current.segment.length - 1; index >= 0; index--) {
+			if (current.segment[index]?.user) {
+				lastUserIndex = index;
+				break;
+			}
+		}
+		if (lastUserIndex === -1) {
+			ctx.ui.notify("本段还没有你的台词，无从重说", "warning");
 			return;
 		}
-		const prose = readProse(rehearsal.prosePath).trim();
-		if (!prose) {
-			ctx.ui.notify("排练稿还没有内容，先 /对戏成文", "warning");
+		if (lastUserIndex === current.segment.length - 1) {
+			ctx.ui.notify("AI 还没有回应，先等它说完再 /重说", "warning");
 			return;
 		}
-		try {
-			const chapter = readChapter(ctx.cwd, chapterArg);
-			const next = `${chapter.content.trimEnd()}\n\n${prose}\n`;
-			saveSnapshot(ctx.cwd, {
-				toolCallId: "command:merge-prose",
-				action: "rewrite",
-				path: chapter.path,
-				oldContent: chapter.content,
-			});
-			rewriteChapter(ctx.cwd, next, chapter.file);
-			ctx.ui.notify(`排练稿已并入 ${chapter.file}（${prose.length} 字）`, "info");
-		} catch (error) {
-			ctx.ui.notify(`并入章节失败：${error instanceof Error ? error.message : String(error)}`, "error");
-		}
+		const userLine = current.segment[lastUserIndex]!;
+		const contextLines = current.segment.slice(0, lastUserIndex);
+		const kept = [...contextLines, userLine];
+		current.segment = kept;
+		rewriteRecordTail(current.recordPath, current.sceneStart, kept);
+		updateRehearsalUi(ctx);
+		ctx.ui.notify(`已撤回上一轮回答，重新生成「${userLine.text.slice(0, 30)}…」的回应`, "info");
+		await runAiTurn(ctx, contextLines, userLine.text);
 	};
-	pi.registerCommand("并入章节", { description: "把排练稿并入指定章节", handler: mergeProseHandler });
+	pi.registerCommand("重说", {
+		description: "撤回最后一句 AI 回应并重新生成",
+		handler: retellHandler,
+		autocompleteVisible: rehearsalOnlyVisible,
+		autocompletePriority: 800,
+	});
+
+	/** 编辑（或删除）本段某一行台词。 */
+	const editLineHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		const current = rehearsal;
+		if (!current || current.cwd !== ctx.cwd) {
+			ctx.ui.notify("当前不在对戏模式", "warning");
+			return;
+		}
+		const total = current.segment.length;
+		if (total === 0) {
+			ctx.ui.notify("本段还没有内容", "warning");
+			return;
+		}
+		const maxPick = Math.min(total, 8);
+		const numbered = args.trim();
+		let targetIndex: number;
+		const parsedIndex = Number(numbered);
+		if (numbered && Number.isInteger(parsedIndex)) {
+			if (parsedIndex < 1 || parsedIndex > total) {
+				ctx.ui.notify(`行号需在 1-${total} 之间（1 = 最早）`, "warning");
+				return;
+			}
+			targetIndex = parsedIndex - 1;
+		} else if (numbered) {
+			ctx.ui.notify("用法：/改台词 <行号>，或直接 /改台词 从最近几行里选", "warning");
+			return;
+		} else {
+			const startIndex = Math.max(0, total - maxPick);
+			const options = current.segment.slice(startIndex).map((line, offset) => {
+				const lineNumber = startIndex + offset + 1;
+				const label = formatRoleLine({ ...line, text: line.text.slice(0, 40) });
+				return `${lineNumber} · ${label}`;
+			});
+			const selected = await ctx.ui.select("选择要修改的台词行（清空内容可删除该行）", options);
+			if (!selected) return;
+			const matched = selected.match(/^(\d+)\s·/);
+			if (!matched) return;
+			targetIndex = Number(matched[1]) - 1;
+		}
+		const line = current.segment[targetIndex];
+		if (!line) return;
+		const edited = await ctx.ui.editor(`修改第 ${targetIndex + 1} 行（清空后回车 = 删除该行）`, formatRoleLine(line));
+		if (edited === undefined) return;
+		if (edited.trim().length === 0) {
+			current.segment.splice(targetIndex, 1);
+		} else {
+			// 整行替换：保留原说话人与用户标记，文本用编辑结果（去标签前缀）
+			const text = edited.trim().replace(/^\[(user:)?[^\]]+\]\s*/, "");
+			current.segment[targetIndex] = { ...line, text: text || line.text };
+		}
+		rewriteRecordTail(current.recordPath, current.sceneStart, current.segment);
+		updateRehearsalUi(ctx);
+		ctx.ui.notify("台词已更新", "info");
+	};
+	pi.registerCommand("改台词", {
+		description: "修改或删除本段的一行台词",
+		handler: editLineHandler,
+		autocompleteVisible: rehearsalOnlyVisible,
+		autocompletePriority: 790,
+	});
 
 	const undoHandler = async (_args: string, ctx: ExtensionCommandContext) => {
 		const snapshot = undoLast(ctx.cwd);
@@ -1117,8 +1325,16 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			ctx.ui.notify(`${item.rule.name}：${state}`, "info");
 		}
 	};
-	pi.registerCommand("规则", { description: "切换写作规则开关", handler: rulesHandler });
-	pi.registerCommand("rules", { description: "Toggle writing rules", handler: rulesHandler });
+	pi.registerCommand("规则", {
+		description: "切换写作规则开关",
+		handler: rulesHandler,
+		autocompletePriority: 370,
+	});
+	pi.registerCommand("rules", {
+		description: "Toggle writing rules",
+		handler: rulesHandler,
+		autocompletePriority: 370,
+	});
 
 	const armorHandler = async (args: string, ctx: ExtensionCommandContext) => {
 		const trimmed = args.trim();
@@ -1140,7 +1356,11 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		setArmorBreakEnabled(ctx.cwd, enabled);
 		ctx.ui.notify(`破甲模式：${enabled ? "开启" : "关闭"}。请新开一个会话（/new 或重启 pi-xie）后生效。`, "info");
 	};
-	pi.registerCommand("破甲", { description: "切换系统提示词破甲模式", handler: armorHandler });
+	pi.registerCommand("破甲", {
+		description: "切换系统提示词破甲模式",
+		handler: armorHandler,
+		autocompletePriority: 380,
+	});
 
 	const permissionsHandler = async (args: string, ctx: ExtensionCommandContext) => {
 		const trimmed = args.trim();

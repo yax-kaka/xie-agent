@@ -1,9 +1,11 @@
 /**
  * 对戏模式：角色扮演子代理的状态、记录文件与提示词组装。
  *
- * 记录文件（.pi-xie/rehearsals/<scene>-<aiCharacter>.md）是持久日志，
+ * 记录文件（premises/rehearsals/<scene>-<ai...>.md）是持久日志，
  * 用 "\n---\n" 分隔多个对戏段；只有最后一段参与子代理上下文与界面显示。
  * 每段开头可用 "# 起始：..." 注释记录用户设定的起始情境。
+ * 一段对戏可有多名 AI 角色参与（群聊）：单角色保持旧文件命名 <scene>-<ai>.md，
+ * 多角色使用 <scene>-<ai1>-<ai2>.md（id 排序，幂等）。
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -18,12 +20,17 @@ export interface RoleLine {
 	user: boolean;
 }
 
+export interface RehearsalParticipant {
+	id: string;
+	name: string;
+}
+
 export interface RehearsalContext {
 	cwd: string;
 	sceneId: string;
 	sceneName: string;
-	aiCharacterId: string;
-	aiCharacterName: string;
+	/** 参与对戏的 AI 角色（选择顺序 = 出场顺序）。 */
+	aiCharacters: RehearsalParticipant[];
 	/** 用户扮演的角色名；undefined 表示旁白/自己。 */
 	userRoleName: string | undefined;
 	recordPath: string;
@@ -56,12 +63,19 @@ function fileStem(value: string): string {
 	);
 }
 
-export function recordPathFor(cwd: string, sceneId: string, aiCharacterId: string): string {
-	return join(rehearsalDir(cwd), `${fileStem(sceneId)}-${fileStem(aiCharacterId)}.md`);
+/** 单角色保持旧命名；多角色按 id 排序拼接，保证幂等。 */
+function participantStem(aiCharacterIds: string[]): string {
+	const ids = [...aiCharacterIds];
+	if (ids.length === 1) return fileStem(ids[0]!);
+	return ids.sort().map(fileStem).join("-");
 }
 
-export function prosePathFor(cwd: string, sceneId: string, aiCharacterId: string): string {
-	return join(rehearsalDir(cwd), "prose", `${fileStem(sceneId)}-${fileStem(aiCharacterId)}.md`);
+export function recordPathFor(cwd: string, sceneId: string, aiCharacterIds: string[]): string {
+	return join(rehearsalDir(cwd), `${fileStem(sceneId)}-${participantStem(aiCharacterIds)}.md`);
+}
+
+export function prosePathFor(cwd: string, sceneId: string, aiCharacterIds: string[]): string {
+	return join(rehearsalDir(cwd), "prose", `${fileStem(sceneId)}-${participantStem(aiCharacterIds)}.md`);
 }
 
 export function formatRoleLine(line: RoleLine): string {
@@ -102,6 +116,21 @@ export function appendRoleLine(path: string, line: RoleLine): void {
 	const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
 	const body = existing.endsWith("\n") || existing.length === 0 ? existing : `${existing}\n`;
 	writeFileSync(path, `${body}${formatRoleLine(line)}\n`);
+}
+
+/**
+ * 重写当前尾段：保留历史段与分隔符，用 sceneStart + lines 重建尾段
+ * （编辑/删除/重说后落盘，保证记录文件是唯一事实源）。
+ */
+export function rewriteRecordTail(path: string, sceneStart: string, lines: RoleLine[]): void {
+	mkdirSync(dirname(path), { recursive: true });
+	const content = existsSync(path) ? readFileSync(path, "utf8") : "";
+	const segments = content.split(SEGMENT_SEPARATOR);
+	const prefix = segments.length > 1 ? `${segments.slice(0, -1).join(SEGMENT_SEPARATOR)}${SEGMENT_SEPARATOR}` : "";
+	const normalized = sceneStart?.replace(/\s*\r?\n\s*/g, " ").trim();
+	const startMarker = normalized ? `${SCENE_START_PREFIX}${normalized}\n` : "";
+	const tail = lines.map(formatRoleLine).join("\n");
+	writeFileSync(path, `${prefix}${startMarker}${tail ? `${tail}\n` : ""}`);
 }
 
 /** 新开一段对戏；sceneStart 会作为注释写入新段开头（换行折叠为空格）。 */
@@ -145,6 +174,21 @@ export function parseSpeakAs(raw: string): { roleName?: string; text: string } {
 	return { roleName: match[1]?.trim(), text: match[2] ?? "" };
 }
 
+/**
+ * 判定 @目标 的分派：命中在场 AI 角色（id 或名字）→ 点名该 AI 接话；
+ * 否则维持旧语义：切换用户扮演角色。
+ */
+export function classifySpeakTarget(
+	roleName: string,
+	aiParticipants: readonly RehearsalParticipant[],
+): { kind: "ai"; participant: RehearsalParticipant } | { kind: "user"; roleName: string } {
+	const normalized = roleName.trim().toLowerCase();
+	const participant = aiParticipants.find(
+		(candidate) => candidate.id.toLowerCase() === normalized || candidate.name.trim().toLowerCase() === normalized,
+	);
+	return participant ? { kind: "ai", participant } : { kind: "user", roleName: roleName.trim() };
+}
+
 const MAX_SUGGESTION_LENGTH = 400;
 
 /**
@@ -164,7 +208,8 @@ export function deriveSceneStartSuggestion(cwd: string): string {
 }
 
 export interface RoleplayPromptInput {
-	aiCharacter: EntityRecord;
+	/** 参与对戏的 AI 角色卡（≥1，顺序即出场顺序）。 */
+	participants: EntityRecord[];
 	userRoleName: string | undefined;
 	sceneName: string;
 	sceneBody: string;
@@ -179,19 +224,24 @@ export interface RoleplayPromptInput {
 	unrestricted: boolean;
 }
 
-/** 子代理系统提示词：人物卡 + 世界设定 + 场景（含起始情境）+ 对戏规则 + 本段记录。 */
+/** 子代理系统提示词：人物卡 ×N + 世界设定 + 场景（含起始情境）+ 对戏规则 + 本段记录。 */
 export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
-	const cardLines = [`名字：${input.aiCharacter.name}`, `设定：${input.aiCharacter.body || "（未填写）"}`];
-	if (input.aiCharacter.system) cardLines.push(`自定义提示词：${input.aiCharacter.system}`);
+	const first = input.participants[0];
+	const cardBlocks = input.participants.map((participant) => {
+		const lines = [`名字：${participant.name}`, `设定：${participant.body || "（未填写）"}`];
+		if (participant.system) lines.push(`自定义提示词：${participant.system}`);
+		return lines.join("\n");
+	});
 
 	const sceneLines = [`场景：${input.sceneName}`];
 	if (input.sceneBody) sceneLines.push(`场景设定：${input.sceneBody}`);
 	if (input.sceneStart) sceneLines.push(`起始情境：${input.sceneStart}`);
 
+	const aiNames = input.participants.map((participant) => participant.name).join("、");
 	const sections = [
-		"你是小说项目中的角色扮演代理，以指定角色的身份进行演出：台词 + 动作神态 + 对场景/道具/对方的感知与互动。你不是叙述者，不要输出第三人称小说正文或旁白。",
+		"你是小说项目中的角色扮演代理，以在场角色的身份进行演出：台词 + 动作神态 + 对场景/道具/对方的感知与互动。你不是叙述者，不要输出第三人称小说正文或旁白。",
 		"[人物卡]",
-		cardLines.join("\n"),
+		cardBlocks.join("\n\n"),
 		"[世界设定]",
 		[
 			`世界观：${input.worldview || "（未填写）"}`,
@@ -202,13 +252,19 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 		`[当前场景]\n${sceneLines.join("\n")}`,
 		"[对戏规则]",
 		[
-			`- 你只扮演「${input.aiCharacter.name}」，以剧本行格式输出：${input.aiCharacter.name}：（动作/神态/互动）台词。动作神态与场景互动可以是一行的前半，需要时也可单独成行。`,
-			"- 每轮都要有表现力：动作（抬手、转身、靠近）、神态（眼神、嘴角、耳根）、与场景或道具的互动（捏紧门框、望向窗外、摆弄桌上的东西），以及该角色能感知到的体感（呼吸、心跳、声音、气味、温度）。",
-			"- 情绪与心理用上述身体语言外化，这是该角色的限知视角；不要用「她感到/她想」式第三人称叙述，不要写小说正文，不要总结性旁白。",
-			"- 每轮推进一小步：1-3 句台词配上适量动作神态即可，把节奏留给用户；不替用户角色行动或说话，不推进时间线跳跃。",
-			`- 用户当前扮演：${input.userRoleName ?? "旁白/自己"}。严禁替用户角色说话或行动，严禁模仿其他角色口吻。`,
+			`- 本场你可以在「${aiNames}」中切换扮演，但每一轮只以「最应该接话」的一个角色身份回应一小步；台词直接点名谁（如「知遥，别闹」）则必须由被点名者回应。`,
+			"- 每个角色的口吻、称呼习惯、彼此关系都要保持区分，严禁模仿其他角色口吻或替用户角色说话/行动。",
+			"- 以剧本行格式输出，每行以角色名开头：角色名：（动作/神态/互动）台词。动作神态与场景互动可以是一行的前半，需要时也可单独成行（不带角色名的动作行会归入上一句）。",
+			"- 每轮都要有表现力：动作（抬手、转身、靠近）、神态（眼神、嘴角、耳根）、与场景或道具的互动（捏紧碗筷、望向窗外、摆弄桌上的东西），以及该角色能感知到的体感（呼吸、心跳、声音、气味、温度）。",
+			"- 情绪与心理用上述身体语言外化，这是角色的限知视角；不要用「她感到/她想」式第三人称叙述，不要写小说正文，不要总结性旁白。",
+			"- 每轮推进一小步：1-3 句台词配上适量动作神态即可，把节奏留给用户，不推进时间线跳跃。",
+			`- 用户当前扮演：${input.userRoleName ?? "旁白/自己"}。严禁替用户角色说话或行动。`,
 			"- 从当前场景的「起始情境」继续，不要另起场景或回退时间线。",
-			`- 示例：${input.aiCharacter.name}：（她没急着接话，手指在门框上轻轻刮了一下，目光落在他发白的脸色上）……先进来说。`,
+			...(first
+				? [
+						`- 示例（先说话的角色假设是${first.name}）：${first.name}：（她没急着接话，手指在门框上轻轻刮了一下，目光落在他发白的脸色上）……先进来说。`,
+					]
+				: []),
 			"- 只输出剧本行本身，不要输出任何说明、前缀或 Markdown 格式。",
 		].join("\n"),
 	];
@@ -220,6 +276,122 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 	}
 	return sections.join("\n\n");
 }
+
+/**
+ * 解析子代理回复为对戏行：每行以「角色名：」开头 → 独立说话人行；
+ * 无角色名前缀的动作/神态行 → 归入上一说话人；首个无法归并的行归给首个 AI 角色。
+ */
+export function parseAiReplyLines(reply: string, participants: readonly RehearsalParticipant[]): RoleLine[] {
+	const lines: RoleLine[] = [];
+	let lastSpeaker: string | undefined;
+	for (const raw of reply.split(/\r?\n/)) {
+		const text = raw.trim();
+		if (!text) continue;
+		const prefixMatch = text.match(/^([^\s（(【]{1,16})[：:]\s*([\s\S]*)$/);
+		const named = prefixMatch ? prefixMatch[1]!.trim() : undefined;
+		const matched = named
+			? participants.find(
+					(candidate) =>
+						candidate.name.trim().toLowerCase() === named.toLowerCase() ||
+						candidate.id.toLowerCase() === named.toLowerCase(),
+				)
+			: undefined;
+		if (matched) {
+			const content = (prefixMatch?.[2] ?? text).trim();
+			if (content) {
+				lines.push({ speaker: matched.name, text: content, user: false });
+				lastSpeaker = matched.name;
+			}
+			continue;
+		}
+		const target = lastSpeaker ?? participants[0]?.name;
+		if (!target) continue;
+		const last = lines[lines.length - 1];
+		if (last && last.speaker === target) {
+			last.text = `${last.text} ${text}`.trim();
+		} else {
+			lines.push({ speaker: target, text, user: false });
+			lastSpeaker = target;
+		}
+	}
+	return lines;
+}
+
+// ============================================================================
+// AI 自动选角
+// ============================================================================
+
+export interface CastCharacter {
+	id: string;
+	name: string;
+	body: string;
+}
+
+export interface CastResult {
+	aiRoles: string[];
+	userRole: string | undefined;
+	reason: string;
+}
+
+/** 选角提示：根据场景与剧情现状从既有角色里挑本场出场角色与用户扮演角色。 */
+export function buildCastPrompt(input: {
+	sceneName: string;
+	sceneBody: string;
+	sceneStart: string;
+	characters: CastCharacter[];
+}): string {
+	const characterLines = input.characters.map((character) => {
+		const hint = character.body.slice(0, 100).replace(/\s+/g, " ").trim();
+		return `- ${character.id}：${character.name}${hint ? `（${hint}…）` : ""}`;
+	});
+	return [
+		"你是小说的选角助手。根据即将发生的对戏场景，从下面的角色名单里选出本场在场的角色，并判断用户最可能扮演谁。",
+		`场景：${input.sceneName}${input.sceneBody ? `\n场景设定：${input.sceneBody}` : ""}`,
+		input.sceneStart ? `剧情现状：${input.sceneStart}` : "",
+		"角色名单（id：名字）：",
+		characterLines.join("\n") || "（空）",
+		"规则：",
+		"- aiRoles：本场在场的、需要 AI 扮演的角色 id 列表（1-3 个）；只从名单里选，id 必须原样返回，禁止编造。",
+		"- userRole：用户扮演的角色 id；无法判断时返回 null（表示旁白/自己）。",
+		"- reason：一句话说明判断依据（可不输出）。",
+		"只输出一个 JSON 对象，不要输出其它内容：",
+		'{"aiRoles":["id1","id2"],"userRole":"id"|null,"reason":"..."}',
+	].join("\n");
+}
+
+/** 防御性解析选角 JSON；任何不满足条件时返回 undefined（调用方回退手动选择）。 */
+export function parseCastResult(text: string, knownCharacters: CastCharacter[]): CastResult | undefined {
+	const stripped = text
+		.replace(/```(?:json)?\s*/gi, "")
+		.replace(/```/g, "")
+		.trim();
+	const start = stripped.indexOf("{");
+	const end = stripped.lastIndexOf("}");
+	if (start === -1 || end <= start) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stripped.slice(start, end + 1));
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null) return undefined;
+	const record = parsed as Record<string, unknown>;
+	const knownIds = new Set(knownCharacters.map((character) => character.id));
+	const aiRoles = Array.isArray(record.aiRoles)
+		? record.aiRoles.filter((id): id is string => typeof id === "string" && knownIds.has(id))
+		: [];
+	if (aiRoles.length === 0) return undefined;
+	const userRole =
+		typeof record.userRole === "string" && knownIds.has(record.userRole) && !aiRoles.includes(record.userRole)
+			? record.userRole
+			: undefined;
+	const reason = typeof record.reason === "string" ? record.reason.slice(0, 200) : "";
+	return { aiRoles, userRole, reason };
+}
+
+// ============================================================================
+// 成文指令
+// ============================================================================
 
 /** 统计对戏记录中的台词行数（每行形如 [角色] 或 [user:角色] 开头）。 */
 export function countTranscriptLines(transcript: string): number {
@@ -289,11 +461,12 @@ export function buildRoleplayWidget(state: RehearsalContext): string[] {
 	const visible = needsOmission ? state.segment.slice(-7) : state.segment;
 	const hiddenCount = state.segment.length - visible.length;
 	const userLabel = state.userRoleName ?? "旁白/自己";
+	const aiLabel = state.aiCharacters.map((participant) => participant.name).join("、");
 	return [
-		`[对戏 · ${state.sceneName} · AI：${state.aiCharacterName} · 你：${userLabel} · 本段 ${state.segment.length} 句]`,
+		`[对戏 · ${state.sceneName} · AI：${aiLabel} · 你：${userLabel} · 本段 ${state.segment.length} 句]`,
 		...(needsOmission ? [`… 已省略更早 ${hiddenCount} 句`] : []),
 		...visible.map(formatRoleLine),
-		"[/对戏：退出/成文 · /扮演 <角色>：切换扮演 · /对戏成文：写入章节并续写]",
+		"[/对戏：退出/成文 · /扮演 <角色>：切换 · /重说：重生成 · /改台词：编辑 · /对戏成文：写入章节]",
 	];
 }
 
