@@ -496,6 +496,7 @@ export class InteractiveMode {
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
+	private extensionCommandsChangedUnsubscribe: (() => void) | undefined;
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -695,15 +696,20 @@ export class InteractiveMode {
 		}));
 
 		// Convert extension commands to SlashCommand format
+		type AutocompleteCommand = SlashCommand & { autocompletePriority?: number };
 		const builtinCommandNames = new Set(slashCommands.map((c) => c.name));
-		const extensionCommands: SlashCommand[] = this.session.extensionRunner
+		const extensionCommands: AutocompleteCommand[] = this.session.extensionRunner
 			.getRegisteredCommands()
 			.filter((cmd) => !builtinCommandNames.has(cmd.name))
-			.map((cmd) => ({
-				name: cmd.invocationName,
-				description: this.prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
-				getArgumentCompletions: cmd.getArgumentCompletions,
-			}));
+			.filter((cmd) => cmd.autocompleteVisible?.() ?? true)
+			.map(
+				(cmd): AutocompleteCommand => ({
+					name: cmd.invocationName,
+					description: this.prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
+					getArgumentCompletions: cmd.getArgumentCompletions,
+					...(cmd.autocompletePriority !== undefined ? { autocompletePriority: cmd.autocompletePriority } : {}),
+				}),
+			);
 
 		// Build skill commands from session.skills (if enabled)
 		this.skillCommands.clear();
@@ -719,10 +725,17 @@ export class InteractiveMode {
 			}
 		}
 
-		// 中文命令排最前（其余命令保持原有相对顺序）
+		// 排序：autocompletePriority 高者在前（高频命令置顶），随后中文命令靠前，其余保持原顺序
 		const isChineseCommand = (command: SlashCommand): boolean => /[\u3400-\u9fff]/.test(command.name);
-		const allCommands = [...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList];
+		const allCommands: AutocompleteCommand[] = [
+			...slashCommands,
+			...templateCommands,
+			...extensionCommands,
+			...skillCommandList,
+		];
 		allCommands.sort((a, b) => {
+			const priorityDelta = (b.autocompletePriority ?? 0) - (a.autocompletePriority ?? 0);
+			if (priorityDelta !== 0) return priorityDelta;
 			const aChinese = isChineseCommand(a);
 			const bChinese = isChineseCommand(b);
 			if (aChinese === bChinese) return 0;
@@ -1898,6 +1911,10 @@ export class InteractiveMode {
 		this.setupAutocompleteProvider();
 
 		const extensionRunner = this.session.extensionRunner;
+		this.extensionCommandsChangedUnsubscribe?.();
+		this.extensionCommandsChangedUnsubscribe = extensionRunner.onExtensionCommandsChanged(() => {
+			this.setupAutocompleteProvider();
+		});
 		this.setupExtensionShortcuts(extensionRunner);
 		this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		this.showStartupNoticesIfNeeded();

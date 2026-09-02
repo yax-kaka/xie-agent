@@ -274,6 +274,7 @@ export class ExtensionRunner {
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
 	private errorListeners: Set<ExtensionErrorListener> = new Set();
+	private commandsChangedListeners: Set<() => void> = new Set();
 	private getModel: () => Model<any> | undefined = () => undefined;
 	private getScopedModels: () => readonly ScopedModel[] = () => [];
 	private isIdleFn: () => boolean = () => true;
@@ -559,6 +560,19 @@ export class ExtensionRunner {
 	onError(listener: ExtensionErrorListener): () => void {
 		this.errorListeners.add(listener);
 		return () => this.errorListeners.delete(listener);
+	}
+
+	/** 命令（或命令可见性）变化时通知（如 TUI 重建 `/` 补全列表）。 */
+	onExtensionCommandsChanged(listener: () => void): () => void {
+		this.commandsChangedListeners.add(listener);
+		return () => this.commandsChangedListeners.delete(listener);
+	}
+
+	/** 由命令执行方在扩展命令 handler 结束后调用。 */
+	commandsMayHaveChanged(): void {
+		for (const listener of this.commandsChangedListeners) {
+			listener();
+		}
 	}
 
 	emitError(error: ExtensionError): void {

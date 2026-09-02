@@ -18,6 +18,9 @@
 - Added `/角色导入` to import Tavern-format character cards (JSON, Operit-compatible `extensions.operit.character_card`), mapping to character entities with `opening`/`system` fields.
 - Added the `runSubAgent` extension API for single-turn, tool-free sub-agent calls that share the session model runtime but none of the session history, with no hard-coded response token cap (provider limit applies).
 - Added a writing-agent guideline: when the user asks for 对戏, stop and direct them to `/对戏` instead of improvising character dialogue in the main session.
+- Extended `/对戏` to group rehearsal: multiple AI characters can be present (breakfast scenes with several speakers); the AI auto-casts the scene from the story state on entry, with manual multi-select as a fallback, and `@名字` prefixes steer the reply to a specific AI character. New scenes can be created from the scene picker at any time.
+- Added `/重说` to roll back and regenerate the last AI reply and `/改台词` to edit or delete a recorded line; both rewrite the record file immediately.
+- Mode-scoped commands (`/扮演`, `/对戏成文`, `/对戏自动`, `/重说`, `/改台词`) only appear in the `/` autocomplete list while a rehearsal is active; command entries support an autocomplete priority so high-frequency commands sort first (`/写作`, `/对戏`, `/破甲`, `/规则` lead the default list).
 
 ### Changed
 

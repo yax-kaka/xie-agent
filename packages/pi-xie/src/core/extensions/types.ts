@@ -1177,6 +1177,13 @@ export interface RegisteredCommand {
 	sourceInfo: SourceInfo;
 	description?: string;
 	getArgumentCompletions?: (argumentPrefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
+	/**
+	 * 是否显示在 `/` 补全列表中（每次构建补全列表时求值）。
+	 * 返回 false 的命令仍可通过手动键入执行。缺省视为可见。
+	 */
+	autocompleteVisible?: () => boolean;
+	/** `/` 补全列表排序优先级（数值越大越靠前；缺省 0，稳定排序保持注册顺序）。 */
+	autocompletePriority?: number;
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 }
 

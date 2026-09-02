@@ -1292,7 +1292,6 @@ export class AgentSession {
 
 		try {
 			await command.handler(args, ctx);
-			return true;
 		} catch (err) {
 			// Emit error via extension runner
 			this._extensionRunner.emitError({
@@ -1300,8 +1299,11 @@ export class AgentSession {
 				event: "command",
 				error: err instanceof Error ? err.message : String(err),
 			});
-			return true;
+		} finally {
+			// 命令可能改变扩展状态（如进入/退出对戏）→ 通知模式重建命令补全列表
+			this._extensionRunner.commandsMayHaveChanged();
 		}
+		return true;
 	}
 
 	/**
