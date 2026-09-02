@@ -14,6 +14,7 @@ import { isAutoWriteEnabled, setAutoWriteEnabled } from "./permissions.ts";
 import {
 	AUTO_PROSE_THRESHOLD_LINES,
 	appendRoleLine,
+	applyDefaultUserRole,
 	buildCastPrompt,
 	buildChapterProseInstruction,
 	buildProseInstruction,
@@ -21,6 +22,8 @@ import {
 	buildRoleplayWidget,
 	type CastResult,
 	classifySpeakTarget,
+	DIRECTOR_CONTINUE_MESSAGE,
+	DIRECTOR_FOLLOWUP_ROUNDS,
 	deriveSceneStartSuggestion,
 	formatRoleLine,
 	parseAiReplyLines,
@@ -40,6 +43,7 @@ import {
 	writeProse,
 } from "./roleplay.ts";
 import { parseTavernCard } from "./tavern.ts";
+import { getDefaultUserRole, setDefaultUserRole } from "./user-role.ts";
 import {
 	type ActivePremises,
 	createEntity,
@@ -306,12 +310,22 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		const text = speak.text.trim();
 		if (!text) return;
 
+		const isDirector = current.userRoleName === undefined;
 		const contextLines = [...current.segment];
-		recordRoleplayLine({ speaker: current.userRoleName ?? "你", text, user: true });
+		// 导演模式（旁白/自己）：行标记为 [user:旁白]，与真实角色台词区分
+		recordRoleplayLine({ speaker: current.userRoleName ?? "旁白", text, user: true });
 		updateRehearsalUi(ctx);
 
 		const message = target?.kind === "ai" ? `${text}\n（点名：这一轮请由「${target.participant.name}」回应）` : text;
 		await runAiTurn(ctx, contextLines, message);
+
+		// 导演模式：一条指示后让 AI 角色们自然继续互动若干轮（不入记录）
+		if (isDirector) {
+			for (let round = 0; round < DIRECTOR_FOLLOWUP_ROUNDS; round++) {
+				if (!rehearsal || rehearsal !== current) break;
+				await runAiTurn(ctx, [...current.segment], DIRECTOR_CONTINUE_MESSAGE);
+			}
+		}
 	};
 	pi.on("session_start", (_event, ctx) => {
 		systemPromptShown = false;
@@ -953,23 +967,30 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		} else {
 			// AI 自动选角：推断本场出场角色与用户扮演角色
 			let cast: CastResult | undefined;
+			const defaultRoleId = getDefaultUserRole(ctx.cwd);
 			try {
 				const sceneStartHint = deriveSceneStartSuggestion(ctx.cwd);
+				const castCharacters = characters.map((candidate) => ({
+					id: candidate.id,
+					name: candidate.name,
+					body: candidate.body,
+				}));
 				const castInput = {
 					sceneName: scene.name,
 					sceneBody: scene.body,
 					sceneStart: sceneStartHint,
-					characters: characters.map((candidate) => ({
-						id: candidate.id,
-						name: candidate.name,
-						body: candidate.body,
-					})),
+					characters: castCharacters,
+					...(defaultRoleId ? { defaultUserRoleId: defaultRoleId } : {}),
 				};
 				const reply = await pi.runSubAgent({
 					systemPrompt: buildCastPrompt(castInput),
 					messages: [{ role: "user", content: "请判断本场出场角色。" }],
 				});
-				cast = reply ? parseCastResult(reply, castInput.characters) : undefined;
+				cast = reply ? parseCastResult(reply, castCharacters) : undefined;
+				// 默认用户扮演角色：AI 不得扮演它，userRole 固定为该角色
+				if (cast && defaultRoleId) {
+					cast = applyDefaultUserRole(cast, defaultRoleId, castCharacters) ?? undefined;
+				}
 			} catch {
 				cast = undefined;
 			}
@@ -1100,6 +1121,50 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		handler: switchRoleHandler,
 		autocompleteVisible: rehearsalOnlyVisible,
 		autocompletePriority: 770,
+	});
+
+	/** 设置项目级默认扮演角色（自动选角时生效；手动选择保持原逻辑）。 */
+	const defaultRoleHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		const characters = listEntities(ctx.cwd, "characters");
+		const trimmed = args.trim();
+		let roleId: string | undefined;
+		if (trimmed) {
+			const lower = trimmed.toLowerCase();
+			if (lower === "旁白" || lower === "clear" || lower === "清除") {
+				roleId = undefined;
+			} else {
+				const target = characters.find((candidate) => candidate.id === trimmed || candidate.name === trimmed);
+				if (!target) {
+					ctx.ui.notify(`未找到角色：${trimmed}`, "warning");
+					return;
+				}
+				roleId = target.id;
+			}
+		} else {
+			const currentId = getDefaultUserRole(ctx.cwd);
+			const options = [
+				"旁白/自己（清除默认）",
+				...characters.map(
+					(candidate) => `${candidate.id} - ${candidate.name}${candidate.id === currentId ? "（当前默认）" : ""}`,
+				),
+			];
+			const selected = await ctx.ui.select("用户默认扮演（自动选角时使用）", options);
+			if (!selected) return;
+			roleId = selected.startsWith("旁白/自己") ? undefined : (selected.split(" - ")[0] ?? undefined);
+		}
+		setDefaultUserRole(ctx.cwd, roleId);
+		const name = roleId ? (characters.find((candidate) => candidate.id === roleId)?.name ?? roleId) : "旁白/自己";
+		ctx.ui.notify(`已设置默认扮演：${name}（下次自动选角生效）`, "info");
+	};
+	pi.registerCommand("默认扮演", {
+		description: "设置自动选角时的默认扮演角色",
+		handler: defaultRoleHandler,
+		autocompletePriority: 360,
+	});
+	pi.registerCommand("default-role", {
+		description: "Set the default user role for auto-cast",
+		handler: defaultRoleHandler,
+		autocompletePriority: 360,
 	});
 
 	/** 把本段对戏交给写作 agent：写入目标章节并继续后续剧情。返回是否已发送。 */

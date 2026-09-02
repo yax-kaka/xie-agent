@@ -46,6 +46,13 @@ export interface RehearsalContext {
 
 export const AUTO_PROSE_THRESHOLD_LINES = 8;
 
+/** 导演模式（用户为旁白/自己）下，一条指示后额外自动推进的子代理回合数。 */
+export const DIRECTOR_FOLLOWUP_ROUNDS = 1;
+
+/** 导演模式内部推进时使用的消息（不入记录文件）。 */
+export const DIRECTOR_CONTINUE_MESSAGE =
+	"（导演模式：没有新的指示，请在场角色按当前局面自然继续互动，直到这一小场自然告一段落）";
+
 const SEGMENT_SEPARATOR = "\n---\n";
 const SCENE_START_PREFIX = "# 起始：";
 
@@ -237,7 +244,6 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 	if (input.sceneBody) sceneLines.push(`场景设定：${input.sceneBody}`);
 	if (input.sceneStart) sceneLines.push(`起始情境：${input.sceneStart}`);
 
-	const aiNames = input.participants.map((participant) => participant.name).join("、");
 	const sections = [
 		"你是小说项目中的角色扮演代理，以在场角色的身份进行演出：台词 + 动作神态 + 对场景/道具/对方的感知与互动。你不是叙述者，不要输出第三人称小说正文或旁白。",
 		"[人物卡]",
@@ -252,13 +258,17 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 		`[当前场景]\n${sceneLines.join("\n")}`,
 		"[对戏规则]",
 		[
-			`- 本场你可以在「${aiNames}」中切换扮演，但每一轮只以「最应该接话」的一个角色身份回应一小步；台词直接点名谁（如「知遥，别闹」）则必须由被点名者回应。`,
+			input.userRoleName
+				? "- 每一轮只以「最应该接话」的一个角色身份回应一小步；台词直接点名谁（如「知遥，别闹」）则必须由被点名者回应。"
+				: "- 导演模式：用户是旁白/导演，不扮演任何角色；用户消息是场景指示或旁白（如「绯雪端着粥进来」），不是角色的台词。收到指示后，可以让多个在场角色按剧情顺序轮流回应（每行「角色名：」），把这一小场推到自然停顿为止，不要替导演总结，也不要在回应里假装接到新的指示。",
 			"- 每个角色的口吻、称呼习惯、彼此关系都要保持区分，严禁模仿其他角色口吻或替用户角色说话/行动。",
 			"- 以剧本行格式输出，每行以角色名开头：角色名：（动作/神态/互动）台词。动作神态与场景互动可以是一行的前半，需要时也可单独成行（不带角色名的动作行会归入上一句）。",
 			"- 每轮都要有表现力：动作（抬手、转身、靠近）、神态（眼神、嘴角、耳根）、与场景或道具的互动（捏紧碗筷、望向窗外、摆弄桌上的东西），以及该角色能感知到的体感（呼吸、心跳、声音、气味、温度）。",
 			"- 情绪与心理用上述身体语言外化，这是角色的限知视角；不要用「她感到/她想」式第三人称叙述，不要写小说正文，不要总结性旁白。",
 			"- 每轮推进一小步：1-3 句台词配上适量动作神态即可，把节奏留给用户，不推进时间线跳跃。",
-			`- 用户当前扮演：${input.userRoleName ?? "旁白/自己"}。严禁替用户角色说话或行动。`,
+			input.userRoleName
+				? `- 用户当前扮演：${input.userRoleName}。严禁替用户角色说话或行动。`
+				: "- 严禁替导演代发指示；多个角色轮流时先开口的角色要承接导演刚给出的局面。",
 			"- 从当前场景的「起始情境」继续，不要另起场景或回退时间线。",
 			...(first
 				? [
@@ -339,11 +349,18 @@ export function buildCastPrompt(input: {
 	sceneBody: string;
 	sceneStart: string;
 	characters: CastCharacter[];
+	/** 用户默认扮演的角色 id（项目级设置）：存在时 userRole 必须为该 id，且不得进入 aiRoles。 */
+	defaultUserRoleId?: string;
 }): string {
 	const characterLines = input.characters.map((character) => {
 		const hint = character.body.slice(0, 100).replace(/\s+/g, " ").trim();
 		return `- ${character.id}：${character.name}${hint ? `（${hint}…）` : ""}`;
 	});
+	const defaultRule = input.defaultUserRoleId
+		? [
+				`- 用户默认扮演「${input.defaultUserRoleId}」（固定设置）：userRole 必须原样返回该 id；aiRoles 严禁包含该 id。`,
+			]
+		: [];
 	return [
 		"你是小说的选角助手。根据即将发生的对戏场景，从下面的角色名单里选出本场在场的角色，并判断用户最可能扮演谁。",
 		`场景：${input.sceneName}${input.sceneBody ? `\n场景设定：${input.sceneBody}` : ""}`,
@@ -353,10 +370,23 @@ export function buildCastPrompt(input: {
 		"规则：",
 		"- aiRoles：本场在场的、需要 AI 扮演的角色 id 列表（1-3 个）；只从名单里选，id 必须原样返回，禁止编造。",
 		"- userRole：用户扮演的角色 id；无法判断时返回 null（表示旁白/自己）。",
+		...defaultRule,
 		"- reason：一句话说明判断依据（可不输出）。",
 		"只输出一个 JSON 对象，不要输出其它内容：",
 		'{"aiRoles":["id1","id2"],"userRole":"id"|null,"reason":"..."}',
 	].join("\n");
+}
+
+/** 应用默认用户角色：从 aiRoles 剔除默认角色并强制 userRole；返回 undefined 表示无法成立（走手动）。 */
+export function applyDefaultUserRole(
+	cast: CastResult,
+	defaultUserRoleId: string,
+	knownCharacters: CastCharacter[],
+): CastResult | undefined {
+	if (!knownCharacters.some((character) => character.id === defaultUserRoleId)) return cast;
+	const aiRoles = cast.aiRoles.filter((id) => id !== defaultUserRoleId);
+	if (aiRoles.length === 0) return undefined;
+	return { aiRoles, userRole: defaultUserRoleId, reason: cast.reason };
 }
 
 /** 防御性解析选角 JSON；任何不满足条件时返回 undefined（调用方回退手动选择）。 */
