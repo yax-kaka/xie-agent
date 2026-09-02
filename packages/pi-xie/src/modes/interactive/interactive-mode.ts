@@ -719,11 +719,17 @@ export class InteractiveMode {
 			}
 		}
 
-		return new CombinedAutocompleteProvider(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
-			this.sessionManager.getCwd(),
-			this.fdPath,
-		);
+		// 中文命令排最前（其余命令保持原有相对顺序）
+		const isChineseCommand = (command: SlashCommand): boolean => /[\u3400-\u9fff]/.test(command.name);
+		const allCommands = [...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList];
+		allCommands.sort((a, b) => {
+			const aChinese = isChineseCommand(a);
+			const bChinese = isChineseCommand(b);
+			if (aChinese === bChinese) return 0;
+			return aChinese ? -1 : 1;
+		});
+
+		return new CombinedAutocompleteProvider(allCommands, this.sessionManager.getCwd(), this.fdPath);
 	}
 
 	private setupAutocompleteProvider(): void {

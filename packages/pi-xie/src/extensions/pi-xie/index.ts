@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { isArmorBreakEnabled, setArmorBreakEnabled } from "../../core/armor-break.ts";
@@ -11,6 +11,26 @@ import type {
 	ToolCallEvent,
 } from "../../core/extensions/index.ts";
 import { isAutoWriteEnabled, setAutoWriteEnabled } from "./permissions.ts";
+import {
+	AUTO_PROSE_THRESHOLD_LINES,
+	appendRoleLine,
+	buildChapterProseInstruction,
+	buildProseInstruction,
+	buildRoleplaySystemPrompt,
+	buildRoleplayWidget,
+	deriveSceneStartSuggestion,
+	parseSpeakAs,
+	prosePathFor,
+	type RehearsalContext,
+	readProse,
+	readRecordSegment,
+	readSegmentSceneStart,
+	recordPathFor,
+	renderTranscript,
+	startNewSegment,
+	writeProse,
+} from "./roleplay.ts";
+import { parseTavernCard } from "./tavern.ts";
 import {
 	type ActivePremises,
 	createEntity,
@@ -58,6 +78,7 @@ const mutatingTools = new Set([
 	"set_style",
 	"write_chapter",
 	"rewrite_chapter",
+	"write_rehearsal_prose",
 	"undo_last",
 ]);
 
@@ -90,6 +111,8 @@ const CreateEntitySchema = Type.Object({
 	id: Type.Optional(Type.String()),
 	tags: Type.Optional(Type.Array(Type.String())),
 	body: Type.String(),
+	opening: Type.Optional(Type.String()),
+	system: Type.Optional(Type.String()),
 });
 
 const UpdateEntitySchema = Type.Object({
@@ -98,6 +121,8 @@ const UpdateEntitySchema = Type.Object({
 	name: Type.Optional(Type.String()),
 	tags: Type.Optional(Type.Array(Type.String())),
 	body: Type.Optional(Type.String()),
+	opening: Type.Optional(Type.String()),
+	system: Type.Optional(Type.String()),
 });
 
 const DeleteEntitySchema = Type.Object({
@@ -140,6 +165,15 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		const text = entry.data?.text ?? "";
 		return new Text(`${theme.fg("accent", `[人脑写作 · ${chapter}]`)}\n${text}`, 0, 0);
 	});
+	pi.registerEntryRenderer<{ speaker: string; text: string; user: boolean }>(
+		"roleplay-line",
+		(entry, _options, theme) => {
+			const speaker = entry.data?.speaker ?? "";
+			const text = entry.data?.text ?? "";
+			const label = entry.data?.user ? theme.fg("accent", `[你·${speaker}]`) : theme.fg("dim", `[${speaker}]`);
+			return new Text(`${label} ${text}`, 0, 0);
+		},
+	);
 
 	let systemPromptShown = false;
 	let noAiChapter: { cwd: string; file: string } | undefined;
@@ -170,10 +204,88 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		);
 		return chapter;
 	};
+
+	let rehearsal: RehearsalContext | undefined;
+	const clearRehearsalUi = (ctx: ExtensionContext) => {
+		ctx.ui.setStatus("roleplay", undefined);
+		ctx.ui.setWidget("roleplay-transcript", undefined);
+	};
+	const updateRehearsalUi = (ctx: ExtensionContext) => {
+		if (!rehearsal) return;
+		ctx.ui.setStatus("roleplay", `对戏模式：${rehearsal.sceneName} · 你：${rehearsal.userRoleName ?? "旁白/自己"}`);
+		ctx.ui.setWidget("roleplay-transcript", buildRoleplayWidget(rehearsal), { placement: "aboveEditor" });
+	};
+	const recordRoleplayLine = (line: { speaker: string; text: string; user: boolean }): void => {
+		if (!rehearsal) return;
+		appendRoleLine(rehearsal.recordPath, line);
+		rehearsal.segment.push(line);
+		pi.appendEntry("roleplay-line", { ...line });
+	};
+	/** 推进一轮对戏：记录用户台词，调用子代理，记录回应对白。 */
+	const advanceRehearsal = async (raw: string, ctx: ExtensionContext): Promise<void> => {
+		const current = rehearsal;
+		if (!current || current.cwd !== ctx.cwd) return;
+		const speak = parseSpeakAs(raw);
+		if (speak.roleName) current.userRoleName = speak.roleName;
+		const text = speak.text.trim();
+		if (!text) return;
+
+		const previousTranscript = renderTranscript(current.segment);
+		recordRoleplayLine({ speaker: current.userRoleName ?? "你", text, user: true });
+		updateRehearsalUi(ctx);
+
+		try {
+			const aiCharacter = getEntity(current.cwd, "characters", current.aiCharacterId);
+			const scene = getEntity(current.cwd, "scenes", current.sceneId);
+			const systemPrompt = buildRoleplaySystemPrompt({
+				aiCharacter,
+				userRoleName: current.userRoleName,
+				sceneName: scene.name,
+				sceneBody: scene.body,
+				sceneStart: current.sceneStart,
+				worldview: readConstraint(current.cwd, "worldview"),
+				outline: readConstraint(current.cwd, "outline"),
+				timeline: readConstraint(current.cwd, "timeline"),
+				style: getEffectiveStyleText(current.cwd),
+				transcript: previousTranscript,
+				unrestricted: isArmorBreakEnabled(current.cwd),
+			});
+			const reply = await pi.runSubAgent({
+				systemPrompt,
+				messages: [{ role: "user", content: text }],
+				signal: ctx.signal,
+			});
+			if (reply) {
+				for (const lineText of reply
+					.split(/\r?\n/)
+					.map((line) => line.trim())
+					.filter(Boolean)) {
+					recordRoleplayLine({ speaker: current.aiCharacterName, text: lineText, user: false });
+				}
+				updateRehearsalUi(ctx);
+				if (current.autoProse && current.segment.length - current.proseWatermark >= AUTO_PROSE_THRESHOLD_LINES) {
+					current.proseWatermark = current.segment.length;
+					pi.sendUserMessage(
+						buildProseInstruction({
+							sceneName: current.sceneName,
+							transcript: renderTranscript(current.segment),
+							replace: false,
+						}),
+					);
+				}
+			} else {
+				ctx.ui.notify("对戏代理未返回对白（未配置模型或已取消）", "warning");
+			}
+		} catch (error) {
+			ctx.ui.notify(`对戏失败：${error instanceof Error ? error.message : String(error)}`, "error");
+		}
+	};
 	pi.on("session_start", (_event, ctx) => {
 		systemPromptShown = false;
 		noAiChapter = undefined;
 		clearNoAiUi(ctx);
+		rehearsal = undefined;
+		clearRehearsalUi(ctx);
 	});
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (systemPromptShown || ctx.mode !== "tui") return;
@@ -213,6 +325,17 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		if (event.images && event.images.length > 0) {
 			ctx.ui.notify("人脑模式只写入文字，图片已忽略", "warning");
 		}
+		return { action: "handled" };
+	});
+
+	pi.on("input", async (event, ctx) => {
+		if (!rehearsal || event.source !== "interactive") return { action: "continue" };
+		if (rehearsal.cwd !== ctx.cwd) {
+			rehearsal = undefined;
+			clearRehearsalUi(ctx);
+			return { action: "continue" };
+		}
+		await advanceRehearsal(event.text, ctx);
 		return { action: "handled" };
 	});
 
@@ -260,6 +383,8 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 				name: params.name,
 				tags: params.tags,
 				body: params.body,
+				opening: params.opening,
+				system: params.system,
 			});
 			saveSnapshot(ctx.cwd, { toolCallId, action: "create", path: record.path, oldContent: null });
 			return textResult(JSON.stringify(record, null, 2));
@@ -284,8 +409,36 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 				name: params.name,
 				tags: params.tags,
 				body: params.body,
+				opening: params.opening,
+				system: params.system,
 			});
 			return textResult(JSON.stringify(record, null, 2));
+		},
+	});
+
+	pi.registerTool({
+		name: "write_rehearsal_prose",
+		label: "Write rehearsal prose",
+		description:
+			"把对戏改写的正文写入当前排练稿文件（premises/rehearsals/prose/）。replace=true 覆盖整个文件，否则追加。",
+		parameters: Type.Object({
+			content: Type.String(),
+			replace: Type.Optional(Type.Boolean()),
+		}),
+		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!rehearsal || rehearsal.cwd !== ctx.cwd) {
+				throw new Error("当前没有进行中的对戏，无法写入排练稿");
+			}
+			const previous = readProse(rehearsal.prosePath);
+			const path = writeProse(rehearsal.prosePath, params.content, params.replace === true);
+			saveSnapshot(ctx.cwd, {
+				toolCallId,
+				action: "rewrite",
+				path,
+				oldContent: previous || null,
+			});
+			if (ctx.hasUI) ctx.ui.notify(`排练稿已更新（${params.replace === true ? "覆盖" : "追加"}）`, "info");
+			return textResult(`已写入排练稿（${params.replace === true ? "覆盖" : "追加"}）：${path}`);
 		},
 	});
 
@@ -488,6 +641,48 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("scene", { description: "List or create scenes", handler: sceneCommand });
 	pi.registerCommand("场景", { description: "List or create scenes", handler: sceneCommand });
 
+	const importCharacterHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		const filePath = args.trim();
+		if (!filePath) {
+			ctx.ui.notify("用法：/角色导入 <tavern.json>（PNG 角色卡暂不支持）", "warning");
+			return;
+		}
+		if (filePath.toLowerCase().endsWith(".png")) {
+			ctx.ui.notify("PNG 角色卡暂不支持，请先导出为 JSON。", "error");
+			return;
+		}
+		const absolute = resolve(ctx.cwd, filePath);
+		let content: string;
+		try {
+			content = readFileSync(absolute, "utf8");
+		} catch {
+			ctx.ui.notify(`无法读取文件：${absolute}`, "error");
+			return;
+		}
+		try {
+			const card = parseTavernCard(content);
+			ensureWorkspace(ctx.cwd);
+			const record = createEntity(ctx.cwd, "characters", {
+				name: card.name,
+				tags: card.tags,
+				body: card.body,
+				opening: card.opening,
+				system: card.system,
+			});
+			ctx.ui.notify(`已导入角色：${record.id}（${record.name}）`, "info");
+		} catch (error) {
+			ctx.ui.notify(`角色卡导入失败：${error instanceof Error ? error.message : String(error)}`, "error");
+		}
+	};
+	pi.registerCommand("角色导入", {
+		description: "导入 Tavern 格式角色卡（JSON，兼容 Operit）",
+		handler: importCharacterHandler,
+	});
+	pi.registerCommand("import-character", {
+		description: "Import a Tavern character card (JSON, Operit compatible)",
+		handler: importCharacterHandler,
+	});
+
 	const constraintAliases = {
 		worldview: "世界观",
 		outline: "大纲",
@@ -599,6 +794,284 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	};
 	pi.registerCommand("noai", { description: "切换持续人脑写作模式（不调用 AI）", handler: noAiHandler });
 	pi.registerCommand("人脑", { description: "切换持续人脑写作模式（不调用 AI）", handler: noAiHandler });
+
+	const rehearsalCommand = async (_args: string, ctx: ExtensionCommandContext) => {
+		if (!ctx.isIdle()) {
+			ctx.ui.notify("Agent is busy", "warning");
+			return;
+		}
+		ensureWorkspace(ctx.cwd);
+
+		if (rehearsal?.cwd === ctx.cwd) {
+			const action = await ctx.ui.select("对戏模式", ["退出对戏", "退出并成文", "新开一段对戏"]);
+			if (action === "退出对戏") {
+				rehearsal = undefined;
+				clearRehearsalUi(ctx);
+				ctx.ui.notify("已退出对戏模式", "info");
+			} else if (action === "退出并成文") {
+				const sent = await runProseConversion(ctx, true);
+				if (sent) {
+					rehearsal = undefined;
+					clearRehearsalUi(ctx);
+					ctx.ui.notify("已退出对戏模式，正文已交给写作 agent", "info");
+				}
+			} else if (action === "新开一段对戏" && rehearsal) {
+				const entered = await ctx.ui.editor(
+					"新一段的起始情境（按剧情现状预填，可直接用、修改或重写）",
+					deriveSceneStartSuggestion(ctx.cwd),
+				);
+				if (entered === undefined) return;
+				const sceneStart = entered.trim();
+				startNewSegment(rehearsal.recordPath, sceneStart || undefined);
+				rehearsal.sceneStart = sceneStart;
+				rehearsal.segment = [];
+				rehearsal.proseWatermark = 0;
+				updateRehearsalUi(ctx);
+				ctx.ui.notify("已新开一段对戏", "info");
+			}
+			return;
+		}
+
+		// 场景：没有场景时引导就地创建（用 /场景 可后续编辑设定）
+		let sceneId: string;
+		const scenes = listEntities(ctx.cwd, "scenes");
+		if (scenes.length === 0) {
+			const sceneName = await ctx.ui.input(
+				"还没有场景。创建本场对戏的场景名称",
+				"例如：绯雪房间门口 / 山顶草地。回车确认，取消则退出",
+			);
+			if (sceneName === undefined) return;
+			const trimmedName = sceneName.trim();
+			if (!trimmedName) return;
+			const createdScene = createEntity(ctx.cwd, "scenes", { name: trimmedName, body: "" });
+			sceneId = createdScene.id;
+		} else {
+			const selectedScene = await ctx.ui.select(
+				"选择对戏场景",
+				scenes.map((scene) => scene.id),
+			);
+			if (!selectedScene) return;
+			sceneId = selectedScene;
+		}
+
+		// AI 扮演的角色：没有人物时引导就地创建（用 /人物 或 /角色导入 可补充设定）
+		const characters = listEntities(ctx.cwd, "characters");
+		let aiChoice: string;
+		if (characters.length === 0) {
+			const aiName = await ctx.ui.input(
+				"还没有人物。AI 扮演的角色名",
+				"例如：绯雪。回车确认（稍后可用 /人物 补充设定，或 /角色导入 导入角色卡）",
+			);
+			if (aiName === undefined) return;
+			const trimmedName = aiName.trim();
+			if (!trimmedName) return;
+			const created = createEntity(ctx.cwd, "characters", { name: trimmedName, body: "" });
+			aiChoice = `${created.id} - ${created.name}`;
+		} else {
+			const selected = await ctx.ui.select(
+				"AI 扮演的角色",
+				characters.map((character) => `${character.id} - ${character.name}`),
+			);
+			if (!selected) return;
+			aiChoice = selected;
+		}
+		const aiCharacterId = aiChoice.split(" - ")[0];
+		const aiCharacter = getEntity(ctx.cwd, "characters", aiCharacterId);
+
+		// 用户扮演的角色：任意名字或旁白；不必是已存在的人物
+		let userRoleName: string | undefined;
+		if (characters.length === 0) {
+			const userInput = await ctx.ui.input("你扮演的角色名", "例如：策栖辞。留空 = 旁白/自己");
+			if (userInput === undefined) return;
+			const trimmed = userInput.trim();
+			userRoleName = trimmed || undefined;
+		} else {
+			const userChoice = await ctx.ui.select("你扮演", [
+				"旁白/自己",
+				...characters.map((character) => `${character.id} - ${character.name}`),
+			]);
+			if (!userChoice) return;
+			userRoleName = userChoice === "旁白/自己" ? undefined : (userChoice.split(" - ")[1] ?? userChoice);
+		}
+
+		const recordPath = recordPathFor(ctx.cwd, sceneId, aiCharacterId);
+		let segment = readRecordSegment(recordPath);
+		let sceneStart = readSegmentSceneStart(recordPath) ?? "";
+		if (segment.length > 0) {
+			const action = await ctx.ui.select("已有对戏记录", ["续写这段对戏", "新开一段"]);
+			if (!action) return;
+			if (action === "新开一段") {
+				segment = [];
+				sceneStart = "";
+			}
+		}
+
+		if (segment.length === 0) {
+			// 按剧情现状预填起始情境；用户可直接用、修改或完全重写（最大权限）。
+			const entered = await ctx.ui.editor(
+				"本场对戏的起始情境（按剧情现状预填，可直接用、修改或重写）",
+				deriveSceneStartSuggestion(ctx.cwd),
+			);
+			if (entered === undefined) return;
+			sceneStart = entered.trim();
+		}
+
+		const scene = getEntity(ctx.cwd, "scenes", sceneId);
+		if (segment.length === 0) {
+			startNewSegment(recordPath, sceneStart || undefined);
+		}
+		rehearsal = {
+			cwd: ctx.cwd,
+			sceneId,
+			sceneName: scene.name,
+			aiCharacterId,
+			aiCharacterName: aiCharacter.name,
+			userRoleName,
+			recordPath,
+			prosePath: prosePathFor(ctx.cwd, sceneId, aiCharacterId),
+			sceneStart,
+			segment,
+			proseWatermark: 0,
+			autoProse: false,
+		};
+		noAiChapter = undefined;
+		clearNoAiUi(ctx);
+		updateRehearsalUi(ctx);
+		ctx.ui.notify(`已进入对戏模式：${scene.name} · AI 扮演 ${aiCharacter.name}`, "info");
+	};
+	pi.registerCommand("对戏", {
+		description: "进入角色扮演对戏模式（AI 扮演人物，你扮演任意角色）",
+		handler: rehearsalCommand,
+	});
+	pi.registerCommand("roleplay", { description: "Enter roleplay rehearsal mode", handler: rehearsalCommand });
+
+	const switchRoleHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		if (!rehearsal || rehearsal.cwd !== ctx.cwd) {
+			ctx.ui.notify("当前不在对戏模式", "warning");
+			return;
+		}
+		let roleName = args.trim();
+		if (!roleName) {
+			const characters = listEntities(ctx.cwd, "characters");
+			const selected = await ctx.ui.select("切换扮演角色", [
+				"旁白/自己",
+				...characters.map((character) => `${character.id} - ${character.name}`),
+			]);
+			if (!selected) return;
+			roleName = selected;
+		}
+		rehearsal.userRoleName = roleName === "旁白/自己" ? undefined : roleName;
+		updateRehearsalUi(ctx);
+		ctx.ui.notify(`你现在扮演：${rehearsal.userRoleName ?? "旁白/自己"}`, "info");
+	};
+	pi.registerCommand("扮演", { description: "切换你扮演的角色", handler: switchRoleHandler });
+	pi.registerCommand("act-as", { description: "Switch the role you are playing", handler: switchRoleHandler });
+
+	/** 把本段对戏交给写作 agent：写入目标章节并继续后续剧情。返回是否已发送。 */
+	const runProseConversion = async (ctx: ExtensionCommandContext, exitAfter: boolean): Promise<boolean> => {
+		if (!rehearsal || rehearsal.cwd !== ctx.cwd) {
+			ctx.ui.notify("当前不在对戏模式", "warning");
+			return false;
+		}
+		if (!ctx.isIdle()) {
+			ctx.ui.notify("Agent is busy", "warning");
+			return false;
+		}
+		if (rehearsal.segment.length === 0) {
+			ctx.ui.notify("本段对戏还没有内容", "warning");
+			return false;
+		}
+		const chapters = listChapters(ctx.cwd);
+		if (chapters.length === 0) {
+			ctx.ui.notify("还没有章节，请先让写作 agent 写出章节", "warning");
+			return false;
+		}
+		const chapterChoices = [...chapters].reverse().map((chapter) => chapter.file);
+		const selected = await ctx.ui.select("写入哪个章节（第一个为最新）", chapterChoices);
+		if (!selected) return false;
+		const continuation = await ctx.ui.input(
+			exitAfter ? "成文后继续写到的位置" : "成文后继续写到的位置（可选）",
+			exitAfter
+				? "必填：例如「继续写到太阳落山，两人下山」。成文后写作 agent 会接着写"
+				: "可选：例如「继续写到太阳落山，两人下山」。留空则只写入对话正文",
+		);
+		if (continuation === undefined) return false;
+
+		rehearsal.proseWatermark = rehearsal.segment.length;
+		pi.sendUserMessage(
+			buildChapterProseInstruction({
+				chapterFile: selected,
+				sceneName: rehearsal.sceneName,
+				transcript: renderTranscript(rehearsal.segment),
+				continuation: continuation.trim() || undefined,
+			}),
+		);
+		ctx.ui.notify(`已把本段对戏交给写作 agent：写入 ${selected} 并继续写`, "info");
+		return true;
+	};
+
+	const proseHandler = async (_args: string, ctx: ExtensionCommandContext) => {
+		await runProseConversion(ctx, false);
+	};
+	pi.registerCommand("对戏成文", {
+		description: "把本段对戏转成正文写入章节并继续写后续剧情",
+		handler: proseHandler,
+	});
+
+	const autoProseHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		if (!rehearsal || rehearsal.cwd !== ctx.cwd) {
+			ctx.ui.notify("当前不在对戏模式", "warning");
+			return;
+		}
+		const trimmed = args.trim();
+		if (trimmed) {
+			const enabled = parseEnabledState(trimmed);
+			if (enabled === undefined) {
+				ctx.ui.notify("用法：/对戏自动 <开|关>", "warning");
+				return;
+			}
+			rehearsal.autoProse = enabled;
+		} else {
+			rehearsal.autoProse = !rehearsal.autoProse;
+		}
+		ctx.ui.notify(
+			`自动成文：${rehearsal.autoProse ? `开启（每 ${AUTO_PROSE_THRESHOLD_LINES} 句转一次）` : "关闭"}`,
+			"info",
+		);
+	};
+	pi.registerCommand("对戏自动", { description: "切换自动成文", handler: autoProseHandler });
+
+	const mergeProseHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		if (!rehearsal || rehearsal.cwd !== ctx.cwd) {
+			ctx.ui.notify("当前不在对戏模式", "warning");
+			return;
+		}
+		const chapterArg = args.trim();
+		if (!chapterArg) {
+			ctx.ui.notify("用法：/并入章节 <章节号或文件名>", "warning");
+			return;
+		}
+		const prose = readProse(rehearsal.prosePath).trim();
+		if (!prose) {
+			ctx.ui.notify("排练稿还没有内容，先 /对戏成文", "warning");
+			return;
+		}
+		try {
+			const chapter = readChapter(ctx.cwd, chapterArg);
+			const next = `${chapter.content.trimEnd()}\n\n${prose}\n`;
+			saveSnapshot(ctx.cwd, {
+				toolCallId: "command:merge-prose",
+				action: "rewrite",
+				path: chapter.path,
+				oldContent: chapter.content,
+			});
+			rewriteChapter(ctx.cwd, next, chapter.file);
+			ctx.ui.notify(`排练稿已并入 ${chapter.file}（${prose.length} 字）`, "info");
+		} catch (error) {
+			ctx.ui.notify(`并入章节失败：${error instanceof Error ? error.message : String(error)}`, "error");
+		}
+	};
+	pi.registerCommand("并入章节", { description: "把排练稿并入指定章节", handler: mergeProseHandler });
 
 	const undoHandler = async (_args: string, ctx: ExtensionCommandContext) => {
 		const snapshot = undoLast(ctx.cwd);

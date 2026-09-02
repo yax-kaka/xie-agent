@@ -13,9 +13,15 @@
 - Added a fullscreen exit output setting to choose between printing the final transcript and only a session resume hint.
 - Added the `defaultTools` setting for configuring the initial built-in tool selection globally or per project.
 - Added `--use-theme <name[/name]>` to choose an initial per-run interactive theme without changing saved settings ([#7722](https://github.com/earendil-works/pi/pull/7722) by [@rwachtler](https://github.com/rwachtler)).
+- Added a `/对戏` roleplay rehearsal mode: an isolated-context sub-agent plays a chosen character while the user plays any role, with per-turn dialogue recorded under `premises/rehearsals/`. The user sets each scene's starting situation from a prefilled chapter-tail editor; scenes and characters are created inline when missing.
+- Added `/对戏成文` (and "exit and convert"), `/对戏自动` (auto preview every 8 lines), and `/扮演` commands; conversion preserves every rehearsed line (with a line-count self-check) and can continue the chapter narration in the same turn. When 破甲 mode is on, the sub-agent prompt carries the same unrestricted block as the main agent.
+- Added `/角色导入` to import Tavern-format character cards (JSON, Operit-compatible `extensions.operit.character_card`), mapping to character entities with `opening`/`system` fields.
+- Added the `runSubAgent` extension API for single-turn, tool-free sub-agent calls that share the session model runtime but none of the session history, with no hard-coded response token cap (provider limit applies).
+- Added a writing-agent guideline: when the user asks for 对戏, stop and direct them to `/对戏` instead of improvising character dialogue in the main session.
 
 ### Changed
 
+- Chinese-named slash commands now sort to the top of the `/` autocomplete list.
 - Replaced the inherited Mistral SDK transport with a native Chat Completions HTTP stream, eliminating its generated client and schema runtime overhead.
 - Documented the generic `AI_AGENT=pi` process marker and how it differs from `PI_CODING_AGENT=true` ([#7747](https://github.com/earendil-works/pi/issues/7747)).
 

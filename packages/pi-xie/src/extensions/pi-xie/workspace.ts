@@ -10,10 +10,18 @@ export interface EntityMeta {
 	tags: string[];
 	updatedAt: string;
 	kind: EntityKind;
+	/** 开场白：进入对戏时子代理的自我介绍或场景开场。 */
+	opening?: string;
+	/** 高级自定义提示词：追加到角色卡之后、世界设定之前。 */
+	system?: string;
 }
 
 export interface EntityRecord extends EntityMeta {
 	body: string;
+	/** 开场白：进入对戏时子代理的自我介绍或场景开场。 */
+	opening: string;
+	/** 高级自定义提示词：追加到角色卡之后、世界设定之前。 */
+	system: string;
 	path: string;
 }
 
@@ -130,7 +138,14 @@ export function listEntities(cwd: string, kind: EntityKind): EntityRecord[] {
 			const content = readFileSync(path, "utf8");
 			const decoded = decodeFrontmatter(content);
 			if (!decoded) return undefined;
-			return { ...decoded.meta, kind, body: decoded.body, path };
+			return {
+				...decoded.meta,
+				kind,
+				body: decoded.body,
+				opening: decoded.meta.opening ?? "",
+				system: decoded.meta.system ?? "",
+				path,
+			};
 		})
 		.filter((entity): entity is EntityRecord => entity !== undefined)
 		.sort((a, b) => a.id.localeCompare(b.id));
@@ -142,13 +157,20 @@ export function getEntity(cwd: string, kind: EntityKind, id: string): EntityReco
 	const content = readFileSync(path, "utf8");
 	const decoded = decodeFrontmatter(content);
 	if (!decoded) throw new Error(`Invalid entity file: ${path}`);
-	return { ...decoded.meta, kind, body: decoded.body, path };
+	return {
+		...decoded.meta,
+		kind,
+		body: decoded.body,
+		opening: decoded.meta.opening ?? "",
+		system: decoded.meta.system ?? "",
+		path,
+	};
 }
 
 export function createEntity(
 	cwd: string,
 	kind: EntityKind,
-	input: { id?: string; name: string; tags?: string[]; body: string },
+	input: { id?: string; name: string; tags?: string[]; body: string; opening?: string; system?: string },
 ): EntityRecord {
 	const dir = entityDir(cwd, kind);
 	mkdirSync(dir, { recursive: true });
@@ -160,6 +182,8 @@ export function createEntity(
 		updatedAt: new Date().toISOString(),
 		kind,
 		body: input.body,
+		opening: input.opening ?? "",
+		system: input.system ?? "",
 		path: join(dir, `${id}.md`),
 	};
 	writeFileSync(record.path, encodeFrontmatter(record, record.body));
@@ -170,7 +194,7 @@ export function updateEntity(
 	cwd: string,
 	kind: EntityKind,
 	id: string,
-	input: { name?: string; tags?: string[]; body?: string },
+	input: { name?: string; tags?: string[]; body?: string; opening?: string; system?: string },
 ): EntityRecord {
 	const existing = getEntity(cwd, kind, id);
 	const next: EntityRecord = {
@@ -179,6 +203,8 @@ export function updateEntity(
 		tags: input.tags ?? existing.tags,
 		updatedAt: new Date().toISOString(),
 		body: input.body ?? existing.body,
+		opening: input.opening ?? existing.opening,
+		system: input.system ?? existing.system,
 		path: existing.path,
 	};
 	writeFileSync(next.path, encodeFrontmatter(next, next.body));
