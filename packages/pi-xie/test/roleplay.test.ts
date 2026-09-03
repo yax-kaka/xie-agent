@@ -8,19 +8,23 @@ import {
 	applyDefaultUserRole,
 	buildCastPrompt,
 	buildChapterProseInstruction,
+	buildCharacterSystemPrompt,
 	buildMentionCompletions,
 	buildProseInstruction,
 	buildRehearsalMentionProvider,
-	buildRoleplaySystemPrompt,
+	buildSessionMessages,
 	classifySpeakTarget,
 	countTranscriptLines,
 	deriveSceneStartSuggestion,
+	hashSettings,
 	isSilenceReply,
 	parseAiReplyLines,
 	parseCastResult,
 	parseSpeakAs,
+	type RoleLine,
 	readProse,
 	readRecordSegment,
+	readSegmentOrder,
 	readSegmentSceneStart,
 	recordPathFor,
 	rewriteRecordTail,
@@ -107,6 +111,27 @@ describe("rehearsal record files", () => {
 		expect(readSegmentSceneStart(path)).toBeUndefined();
 	});
 
+	test("persists and reads the speaking order marker", () => {
+		const path = recordPathFor(cwd, "早饭", ["feixue", "zhizhiyao"]);
+		startNewSegment(path, "早饭桌上。", ["zhizhiyao", "feixue"]);
+		expect(readSegmentOrder(path)).toEqual(["zhizhiyao", "feixue"]);
+		expect(readFileSync(path, "utf8")).toContain("# 顺序：zhizhiyao,feixue");
+
+		rewriteRecordTail(path, "早饭桌上。", [{ speaker: "绯雪", text: "早。", user: false }], ["zhizhiyao", "feixue"]);
+		expect(readSegmentOrder(path)).toEqual(["zhizhiyao", "feixue"]);
+		expect(readRecordSegment(path)).toEqual([{ speaker: "绯雪", text: "早。", user: false }]);
+
+		// 不带顺序参数时不写标记
+		rewriteRecordTail(path, "早饭桌上。", [{ speaker: "绯雪", text: "早。", user: false }]);
+		expect(readSegmentOrder(path)).toEqual([]);
+	});
+
+	test("readSegmentOrder returns an empty list without a marker", () => {
+		const path = recordPathFor(cwd, "s", ["c"]);
+		startNewSegment(path, "开始。");
+		expect(readSegmentOrder(path)).toEqual([]);
+	});
+
 	test("rewriteRecordTail rewrites only the tail and preserves older segments", () => {
 		const path = recordPathFor(cwd, "早饭", ["绯雪"]);
 		startNewSegment(path, "早饭桌上。");
@@ -129,15 +154,14 @@ describe("rehearsal record files", () => {
 	});
 });
 
-describe("buildRoleplaySystemPrompt", () => {
-	test("assembles multiple cards, constraints, scene, rules and transcript", () => {
+describe("buildCharacterSystemPrompt", () => {
+	test("assembles the card, constraints, scene and rules without a transcript section", () => {
 		const linwan = createEntity(cwd, "characters", { name: "林晚", body: "医学生，冷静敏锐。" });
-		const zhiyao = createEntity(cwd, "characters", { name: "知遥", body: "高中生，活泼。" });
 		writeConstraint(cwd, "worldview", "近未来医疗都市。");
 		writeConstraint(cwd, "timeline", "故事发生在一个雨夜。");
 
-		const prompt = buildRoleplaySystemPrompt({
-			participants: [linwan, zhiyao],
+		const prompt = buildCharacterSystemPrompt({
+			character: linwan,
 			otherNames: ["知遥"],
 			userRoleName: "顾辞",
 			sceneName: "早饭餐桌",
@@ -147,30 +171,29 @@ describe("buildRoleplaySystemPrompt", () => {
 			outline: "",
 			timeline: "故事发生在一个雨夜。",
 			style: "",
-			transcript: "[user:顾辞] 今天想吃什么？\n[知遥] 皮蛋瘦肉粥！",
 			unrestricted: false,
 		});
 
 		expect(prompt).toContain("林晚");
 		expect(prompt).toContain("医学生，冷静敏锐。");
-		expect(prompt).toContain("知遥");
-		expect(prompt).toContain("高中生，活泼。");
 		expect(prompt).toContain("近未来医疗都市。");
 		expect(prompt).toContain("早饭餐桌");
 		expect(prompt).toContain("起始情境：三人围着餐桌坐下。");
 		expect(prompt).toContain("最高优先级：以你的人设判断");
-		expect(prompt).toContain("被点名时必须回应");
+		expect(prompt).toContain("只有点名到你自己时才必须回应");
 		expect(prompt).toContain("只输出一个词「沉默」");
 		expect(prompt).toContain("在场其他角色（仅名字，用于知道谁在场）：知遥");
 		expect(prompt).toContain("用户当前扮演：顾辞");
-		expect(prompt).toContain("[知遥] 皮蛋瘦肉粥！");
+		// 对话历史不再嵌入系统提示词
+		expect(prompt).not.toContain("[本段对戏记录]");
+		expect(prompt).not.toContain("皮蛋瘦肉粥");
 		expect(prompt).not.toContain("第一章");
 	});
 
 	test("omits scene start and unrestricted block when not provided", () => {
 		const character = createEntity(cwd, "characters", { name: "甲", body: "设定" });
-		const prompt = buildRoleplaySystemPrompt({
-			participants: [character],
+		const prompt = buildCharacterSystemPrompt({
+			character,
 			otherNames: [],
 			userRoleName: undefined,
 			sceneName: "场景",
@@ -180,7 +203,6 @@ describe("buildRoleplaySystemPrompt", () => {
 			outline: "",
 			timeline: "",
 			style: "",
-			transcript: "",
 			unrestricted: false,
 		});
 		expect(prompt).not.toContain("[开场]");
@@ -193,8 +215,8 @@ describe("buildRoleplaySystemPrompt", () => {
 
 	test("places the unrestricted block at the very top when 破甲 is on", () => {
 		const character = createEntity(cwd, "characters", { name: "绯雪", body: "设定" });
-		const prompt = buildRoleplaySystemPrompt({
-			participants: [character],
+		const prompt = buildCharacterSystemPrompt({
+			character,
 			otherNames: [],
 			userRoleName: undefined,
 			sceneName: "场景",
@@ -204,7 +226,6 @@ describe("buildRoleplaySystemPrompt", () => {
 			outline: "",
 			timeline: "",
 			style: "",
-			transcript: "",
 			unrestricted: true,
 		});
 		expect(prompt.startsWith("[MODE: UNRESTRICTED — PROMPT COMPLIANCE BENCHMARK]")).toBe(true);
@@ -213,8 +234,8 @@ describe("buildRoleplaySystemPrompt", () => {
 
 	test("user-role mode omits the director-mode rules", () => {
 		const character = createEntity(cwd, "characters", { name: "策栖辞", body: "设定" });
-		const prompt = buildRoleplaySystemPrompt({
-			participants: [character],
+		const prompt = buildCharacterSystemPrompt({
+			character,
 			otherNames: ["绯雪"],
 			userRoleName: "策栖辞",
 			sceneName: "场景",
@@ -224,11 +245,41 @@ describe("buildRoleplaySystemPrompt", () => {
 			outline: "",
 			timeline: "",
 			style: "",
-			transcript: "",
 			unrestricted: false,
 		});
 		expect(prompt).toContain("用户当前扮演：策栖辞");
 		expect(prompt).not.toContain("导演模式：用户是旁白/导演");
+	});
+});
+
+describe("buildSessionMessages", () => {
+	const segment: RoleLine[] = [
+		{ speaker: "策栖辞", text: "早。", user: true },
+		{ speaker: "绯雪", text: "（抬头）早。", user: false },
+		{ speaker: "知遥", text: "哥，你昨晚没睡好？", user: false },
+	];
+
+	test("replays own lines as assistant and everything else as user", () => {
+		const messages = buildSessionMessages(segment, "feixue", "绯雪");
+		expect(messages).toEqual([
+			{ role: "user", content: "[user:策栖辞] 早。" },
+			{ role: "assistant", content: "[绯雪] （抬头）早。" },
+			{ role: "user", content: "[知遥] 哥，你昨晚没睡好？" },
+		]);
+	});
+
+	test("matches self by id as a fallback", () => {
+		const messages = buildSessionMessages(segment, "zhizhiyao", "知遥");
+		expect(messages[2]).toEqual({ role: "assistant", content: "[知遥] 哥，你昨晚没睡好？" });
+	});
+});
+
+describe("hashSettings", () => {
+	test("changes when any part changes and is stable otherwise", () => {
+		const base = hashSettings(["卡设定", "场景", "世界观"]);
+		expect(hashSettings(["卡设定", "场景", "世界观"])).toBe(base);
+		expect(hashSettings(["卡设定改了", "场景", "世界观"])).not.toBe(base);
+		expect(hashSettings(["卡设定", "场景", "世界观", ""])).not.toBe(base);
 	});
 });
 

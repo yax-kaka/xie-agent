@@ -8,9 +8,11 @@
  * 多角色使用 <scene>-<ai1>-<ai2>.md（id 排序，幂等）。
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
+import type { SubAgentMessage } from "../../core/sub-agent.ts";
 import { UNRESTRICTED_SYSTEM_PROMPT } from "../../core/system-prompt.ts";
 import { type EntityRecord, listChapters } from "./workspace.ts";
 
@@ -40,6 +42,8 @@ export interface RehearsalContext {
 	sceneStart: string;
 	/** 当前段的对戏行（不含历史段）。 */
 	segment: RoleLine[];
+	/** 每个 AI 角色的常驻会话（按角色 id 索引；内存态，退出对戏即弃，重开时从记录回放重建）。 */
+	characterSessions: Record<string, CharacterSession>;
 	/** 上次成文时 segment 的行数，用于自动成文节流。 */
 	proseWatermark: number;
 	autoProse: boolean;
@@ -55,6 +59,7 @@ export const DIRECTOR_CONTINUE_MESSAGE = "（导演模式：没有新的指示�
 
 const SEGMENT_SEPARATOR = "\n---\n";
 const SCENE_START_PREFIX = "# 起始：";
+const ORDER_PREFIX = "# 顺序：";
 
 export function rehearsalDir(cwd: string): string {
 	return join(cwd, "premises", "rehearsals");
@@ -118,6 +123,21 @@ export function readSegmentSceneStart(path: string): string | undefined {
 	return match ? match[1]!.trim() || undefined : undefined;
 }
 
+/** 读取当前段开头记录的串行开口顺序（角色 id 列表；无则空数组）。 */
+export function readSegmentOrder(path: string): string[] {
+	if (!existsSync(path)) return [];
+	const content = readFileSync(path, "utf8");
+	const segments = content.split(SEGMENT_SEPARATOR);
+	const tail = segments[segments.length - 1] ?? "";
+	const match = tail.match(new RegExp(`^${ORDER_PREFIX}(.+)$`, "m"));
+	return match
+		? match[1]!
+				.split(",")
+				.map((id) => id.trim())
+				.filter((id) => id.length > 0)
+		: [];
+}
+
 export function appendRoleLine(path: string, line: RoleLine): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
@@ -126,35 +146,38 @@ export function appendRoleLine(path: string, line: RoleLine): void {
 }
 
 /**
- * 重写当前尾段：保留历史段与分隔符，用 sceneStart + lines 重建尾段
- * （编辑/删除/重说后落盘，保证记录文件是唯一事实源）。
+ * 重写当前尾段：保留历史段与分隔符，用 sceneStart + orderIds + lines 重建尾段
+ * （编辑/删除/重说/改顺序后落盘，保证记录文件是唯一事实源）。
  */
-export function rewriteRecordTail(path: string, sceneStart: string, lines: RoleLine[]): void {
+export function rewriteRecordTail(path: string, sceneStart: string, lines: RoleLine[], orderIds?: string[]): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const content = existsSync(path) ? readFileSync(path, "utf8") : "";
 	const segments = content.split(SEGMENT_SEPARATOR);
 	const prefix = segments.length > 1 ? `${segments.slice(0, -1).join(SEGMENT_SEPARATOR)}${SEGMENT_SEPARATOR}` : "";
 	const normalized = sceneStart?.replace(/\s*\r?\n\s*/g, " ").trim();
 	const startMarker = normalized ? `${SCENE_START_PREFIX}${normalized}\n` : "";
+	const orderMarker = orderIds && orderIds.length > 0 ? `${ORDER_PREFIX}${orderIds.join(",")}\n` : "";
 	const tail = lines.map(formatRoleLine).join("\n");
-	writeFileSync(path, `${prefix}${startMarker}${tail ? `${tail}\n` : ""}`);
+	writeFileSync(path, `${prefix}${startMarker}${orderMarker}${tail ? `${tail}\n` : ""}`);
 }
 
-/** 新开一段对戏；sceneStart 会作为注释写入新段开头（换行折叠为空格）。 */
-export function startNewSegment(path: string, sceneStart?: string): void {
+/** 新开一段对戏；sceneStart 与串行开口顺序会作为注释写入新段开头（换行折叠为空格）。 */
+export function startNewSegment(path: string, sceneStart?: string, orderIds?: string[]): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const normalized = sceneStart?.replace(/\s*\r?\n\s*/g, " ").trim();
 	const startMarker = normalized ? `${SCENE_START_PREFIX}${normalized}\n` : "";
+	const orderMarker = orderIds && orderIds.length > 0 ? `${ORDER_PREFIX}${orderIds.join(",")}\n` : "";
+	const header = `${startMarker}${orderMarker}`;
 	if (!existsSync(path)) {
-		writeFileSync(path, startMarker);
+		writeFileSync(path, header);
 		return;
 	}
 	const existing = readFileSync(path, "utf8");
 	if (existing.trim().length === 0) {
-		writeFileSync(path, startMarker);
+		writeFileSync(path, header);
 		return;
 	}
-	writeFileSync(path, `${existing.replace(/\n+$/, "")}${SEGMENT_SEPARATOR}${startMarker}`);
+	writeFileSync(path, `${existing.replace(/\n+$/, "")}${SEGMENT_SEPARATOR}${header}`);
 }
 
 export function readProse(path: string): string {
@@ -214,9 +237,9 @@ export function deriveSceneStartSuggestion(cwd: string): string {
 	return `…${last.slice(-MAX_SUGGESTION_LENGTH)}`;
 }
 
-export interface RoleplayPromptInput {
-	/** 参与对戏的 AI 角色卡（≥1，顺序即出场顺序）。 */
-	participants: EntityRecord[];
+export interface CharacterSystemPromptInput {
+	/** 本角色的卡（仅一张；对话历史走 messages，不再嵌入系统提示词）。 */
+	character: EntityRecord;
 	/** 其他在场 AI 角色的名字（仅名字，用于让角色知道谁在场且不得代演）。 */
 	otherNames: string[];
 	userRoleName: string | undefined;
@@ -228,19 +251,25 @@ export interface RoleplayPromptInput {
 	outline: string;
 	timeline: string;
 	style: string;
-	transcript: string;
 	/** 破甲模式：追加与主写作 agent 相同的 unrestricted 块。 */
 	unrestricted: boolean;
 }
 
-/** 子代理系统提示词：人物卡 ×N + 世界设定 + 场景（含起始情境）+ 对戏规则 + 本段记录。 */
-export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
-	const first = input.participants[0];
-	const cardBlocks = input.participants.map((participant) => {
-		const lines = [`名字：${participant.name}`, `设定：${participant.body || "（未填写）"}`];
-		if (participant.system) lines.push(`自定义提示词：${participant.system}`);
-		return lines.join("\n");
-	});
+/**
+ * 角色子代理的常驻会话：静态 systemPrompt（人物卡+设定+规则）+ 完整消息历史
+ * （自己的台词为 assistant，其余为 user）+ 人设哈希（内容变化时热重建）。
+ */
+export interface CharacterSession {
+	participantId: string;
+	systemPrompt: string;
+	messages: SubAgentMessage[];
+	settingsHash: string;
+}
+
+/** 角色子代理系统提示词：只有本角色的卡 + 世界设定 + 场景（含起始情境）+ 对戏规则。 */
+export function buildCharacterSystemPrompt(input: CharacterSystemPromptInput): string {
+	const cardLines = [`名字：${input.character.name}`, `设定：${input.character.body || "（未填写）"}`];
+	if (input.character.system) cardLines.push(`自定义提示词：${input.character.system}`);
 
 	const sceneLines = [`场景：${input.sceneName}`];
 	if (input.sceneBody) sceneLines.push(`场景设定：${input.sceneBody}`);
@@ -249,7 +278,7 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 	const sections = [
 		"你是小说项目中的角色扮演代理，以在场角色的身份进行演出：台词 + 动作神态 + 对场景/道具/对方的感知与互动。你不是叙述者，不要输出第三人称小说正文或旁白。",
 		"[人物卡]",
-		cardBlocks.join("\n\n"),
+		cardLines.join("\n"),
 		"[世界设定]",
 		[
 			`世界观：${input.worldview || "（未填写）"}`,
@@ -260,7 +289,7 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 		`[当前场景]\n${sceneLines.join("\n")}`,
 		"[对戏规则]",
 		[
-			"- 最高优先级：以你的人设判断此刻你会不会真的开口。被点名时必须回应；话题明确指向你、或按人设此刻必然出声时开口。",
+			"- 最高优先级：以你的人设判断此刻你会不会真的开口。只有点名到你自己时才必须回应；话题明确指向你、或按人设此刻必然出声时开口；别人被点名时，你保持沉默。",
 			"- 判断不清、可开可不开时保持沉默：只输出一个词「沉默」，不要输出任何其它内容；宁可少说，不要抢话。",
 			"- 每次只回应一小步：1-3 句台词配上适量动作神态，把节奏留给用户与在场其他人，不推进时间线跳跃。",
 			input.otherNames.length > 0
@@ -275,22 +304,32 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 			"- 每轮都要有表现力：动作（抬手、转身、靠近）、神态（眼神、嘴角、耳根）、与场景或道具的互动（捏紧碗筷、望向窗外、摆弄桌上的东西），以及该角色能感知到的体感（呼吸、心跳、声音、气味、温度）。",
 			"- 情绪与心理用上述身体语言外化，这是角色的限知视角；不要用「她感到/她想」式第三人称叙述，不要写小说正文，不要总结性旁白。",
 			"- 从当前场景的「起始情境」继续，不要另起场景或回退时间线。",
-			...(first
-				? [
-						`- 示例（先说话的角色假设是${first.name}）：${first.name}：（没急着接话，指尖在碗沿上划了一圈，目光落在他脸上）……先进来说。`,
-					]
-				: []),
+			`- 示例（先说话的角色假设是${input.character.name}）：${input.character.name}：（没急着接话，指尖在碗沿上划了一圈，目光落在他脸上）……先进来说。`,
 			"- 只输出剧本行本身或「沉默」一词，不要输出任何说明、前缀或 Markdown 格式。",
 		].join("\n"),
 	];
-	if (input.transcript) {
-		sections.push("[本段对戏记录]", input.transcript);
-	}
 	if (input.unrestricted) {
 		// 破甲块放在最上面，确保角色扮演时也先读到
 		sections.unshift(UNRESTRICTED_SYSTEM_PROMPT);
 	}
 	return sections.join("\n\n");
+}
+
+/** 把一段记录行回放成某角色的会话消息：自己的台词是 assistant，其余（用户/其他角色）是 user。 */
+export function buildSessionMessages(
+	segment: readonly RoleLine[],
+	selfId: string,
+	selfName: string,
+): SubAgentMessage[] {
+	return segment.map((line) => {
+		const isSelf = !line.user && (line.speaker === selfName || line.speaker === selfId);
+		return { role: isSelf ? "assistant" : "user", content: formatRoleLine(line) };
+	});
+}
+
+/** 人设相关文本的稳定哈希：任一来源变化都会改变结果，用于触发 systemPrompt 热重建。 */
+export function hashSettings(parts: readonly string[]): string {
+	return createHash("sha1").update(parts.join("\u0000")).digest("hex");
 }
 
 /**

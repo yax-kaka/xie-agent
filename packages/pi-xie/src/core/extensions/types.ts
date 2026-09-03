@@ -1325,10 +1325,11 @@ export interface ExtensionAPI {
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
 	/**
-	 * Run a single-turn, tool-free sub-agent with an isolated system prompt and
+	 * Run a tool-free sub-agent turn with an isolated system prompt and
 	 * messages. The sub-agent shares the session model runtime but sees none of
-	 * the session history or tools. Returns the assistant text, or undefined
-	 * when aborted or empty.
+	 * the session history or tools. Messages may span multiple user/assistant
+	 * turns, so callers can keep a persistent sub-agent conversation alive.
+	 * Returns the assistant text, or undefined when aborted or empty.
 	 */
 	runSubAgent(options: RunSubAgentOptions): Promise<string | undefined>;
 
@@ -1583,8 +1584,8 @@ export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => 
 
 export interface RunSubAgentOptions {
 	systemPrompt: string;
-	/** User messages for the sub-agent turn. Earlier dialogue is embedded as text. */
-	messages: Array<{ role: "user"; content: string }>;
+	/** Conversation messages for the sub-agent; may span multiple user/assistant turns so callers can keep a persistent sub-agent alive across calls. */
+	messages: Array<{ role: "user" | "assistant"; content: string }>;
 	/** Defaults to the session model when omitted. */
 	model?: Model<Api>;
 	/** Optional cap for the sub-agent response; the provider's own output limit applies when omitted. */

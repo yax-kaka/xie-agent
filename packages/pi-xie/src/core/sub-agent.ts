@@ -2,7 +2,7 @@ import type { Api, AssistantMessage, Context, Model, ModelsSimpleStreamOptions }
 import type { ModelRuntime } from "./model-runtime.ts";
 
 export interface SubAgentMessage {
-	role: "user";
+	role: "user" | "assistant";
 	content: string;
 }
 
@@ -24,10 +24,11 @@ function responseText(message: AssistantMessage): string {
 }
 
 /**
- * Run a single-turn, tool-free sub-agent call against the session model
+ * Run one tool-free completion turn for a sub-agent against the session model
  * runtime. The sub-agent sees only the provided system prompt and messages —
  * no session history, no tools — so its context stays isolated from the
- * writing agent.
+ * writing agent. Messages may span multiple user/assistant turns, which lets
+ * callers keep a persistent sub-agent conversation alive across calls.
  */
 export async function runSubAgent(
 	modelRuntime: ModelRuntime,
@@ -35,11 +36,31 @@ export async function runSubAgent(
 ): Promise<string | undefined> {
 	const context: Context = {
 		systemPrompt: options.systemPrompt,
-		messages: options.messages.map((message) => ({
-			role: message.role,
-			content: [{ type: "text", text: message.content }],
-			timestamp: Date.now(),
-		})),
+		messages: options.messages.map((message) => {
+			const content = [{ type: "text" as const, text: message.content }];
+			const timestamp = Date.now();
+			if (message.role === "assistant") {
+				// 历史 assistant 轮只参与上下文构造；元数据用当前模型占位即可
+				return {
+					role: "assistant",
+					content,
+					api: options.model.api,
+					provider: options.model.provider,
+					model: options.model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp,
+				} satisfies Context["messages"][number];
+			}
+			return { role: "user", content, timestamp } satisfies Context["messages"][number];
+		}),
 	};
 	const requestOptions: ModelsSimpleStreamOptions = {
 		signal: options.signal,

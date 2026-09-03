@@ -72,6 +72,24 @@ describe("runSubAgent", () => {
 		expect(options.signal).toBe(signal);
 	});
 
+	test("passes multi-turn conversations through, including assistant messages", async () => {
+		const completeSimple = vi.fn().mockResolvedValue(assistantResponse("end_turn", "新回复"));
+		const runtime = fakeRuntime({ completeSimple });
+
+		const messages: SubAgentMessage[] = [
+			{ role: "user", content: "[user:策栖辞] 早。" },
+			{ role: "assistant", content: "[绯雪] 早。" },
+			{ role: "user", content: "[user:策栖辞] 昨晚睡得好吗？" },
+		];
+		const result = await runSubAgent(runtime, { systemPrompt: "你是绯雪", messages, model: fakeModel });
+		expect(result).toBe("新回复");
+
+		const [, context] = completeSimple.mock.calls[0] as [Model<Api>, unknown];
+		const ctx = context as { messages?: Array<{ role: string; content: unknown }> };
+		expect(ctx.messages?.map((message) => message.role)).toEqual(["user", "assistant", "user"]);
+		expect(ctx.messages?.[1]?.content).toEqual([{ type: "text", text: "[绯雪] 早。" }]);
+	});
+
 	test("throws on error stop reason", async () => {
 		const completeSimple = vi.fn().mockResolvedValue(assistantResponse("error", undefined, "无 API key"));
 		const runtime = fakeRuntime({ completeSimple });
