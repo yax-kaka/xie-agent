@@ -1,10 +1,11 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { Text } from "@earendil-works/pi-tui";
+import { type AutocompleteItem, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { isArmorBreakEnabled, setArmorBreakEnabled } from "../../core/armor-break.ts";
 import type {
 	AgentToolResult,
+	AutocompleteProviderFactory,
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
@@ -17,9 +18,9 @@ import {
 	applyDefaultUserRole,
 	buildCastPrompt,
 	buildChapterProseInstruction,
+	buildMentionCompletions,
 	buildProseInstruction,
 	buildRoleplaySystemPrompt,
-	buildRoleplayWidget,
 	type CastResult,
 	classifySpeakTarget,
 	DIRECTOR_CONTINUE_MESSAGE,
@@ -225,11 +226,11 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 
 	let rehearsal: RehearsalContext | undefined;
 	let lastRoundSummary: string | undefined;
+	let currentSessionCwd: string | undefined;
 	const rehearsalActive = (): boolean => rehearsal !== undefined;
 	const clearRehearsalUi = (ctx: ExtensionContext) => {
 		lastRoundSummary = undefined;
 		ctx.ui.setStatus("roleplay", undefined);
-		ctx.ui.setWidget("roleplay-transcript", undefined);
 	};
 	const updateRehearsalUi = (ctx: ExtensionContext) => {
 		if (!rehearsal) return;
@@ -237,7 +238,6 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			"roleplay",
 			`对戏模式：${rehearsal.sceneName} · 你：${rehearsal.userRoleName ?? "旁白/自己"}${lastRoundSummary ? ` · ${lastRoundSummary}` : ""}`,
 		);
-		ctx.ui.setWidget("roleplay-transcript", buildRoleplayWidget(rehearsal), { placement: "aboveEditor" });
 	};
 	const recordRoleplayLine = (line: { speaker: string; text: string; user: boolean }): void => {
 		if (!rehearsal) return;
@@ -377,21 +377,34 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		const target = speak.roleName ? classifySpeakTarget(speak.roleName, current.aiCharacters) : undefined;
 		if (target?.kind === "user") current.userRoleName = target.roleName || undefined;
 		const text = speak.text.trim();
-		if (!text) return;
 
 		const isDirector = current.userRoleName === undefined;
-		// 导演模式（旁白/自己）：行标记为 [user:旁白]，与真实角色台词区分
-		recordRoleplayLine({ speaker: current.userRoleName ?? "旁白", text, user: true });
-		updateRehearsalUi(ctx);
-
 		const names = current.aiCharacters.map((participant) => participant.name).join("、");
 		const roundBudget = isDirector ? DIRECTOR_MAX_TURNS : 1;
 		let roundsLeft = roundBudget;
 		let nextRoundMessage = text;
 
+		// 裸点名（如「@千夏」不带台词）：不记录用户行，只让该角色开口
+		if (!text && target?.kind !== "ai") {
+			if (target?.kind === "user") updateRehearsalUi(ctx);
+			return;
+		}
+
+		// 导演模式（旁白/自己）：行标记为 [user:旁白]，与真实角色台词区分
+		if (text) {
+			recordRoleplayLine({ speaker: current.userRoleName ?? "旁白", text, user: true });
+			updateRehearsalUi(ctx);
+		}
+
 		// @点名：只唤醒被点角色强制回应，不惊动其他角色
 		if (target?.kind === "ai") {
-			const produced = await runCharacterTurn(ctx, current, [...current.segment], text, target.participant);
+			const produced = await runCharacterTurn(
+				ctx,
+				current,
+				[...current.segment],
+				text || "（点名：该你说话了，请按当前局面自然回应）",
+				target.participant,
+			);
 			lastRoundSummary = produced ? `${target.participant.name} 接话` : `${target.participant.name} 未回应`;
 			updateRehearsalUi(ctx);
 			if (current.aiCharacters.length > 1) {
@@ -443,12 +456,55 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			);
 		}
 	};
+	/**
+	 * @点名补全：对戏进行中且输入为行首「@xxx」时列出在场 AI 角色；
+	 * 其余输入（含退出对戏后的 @ 文件引用）原样交给 pi 自带补全。
+	 */
+	const buildRehearsalMentionProvider: AutocompleteProviderFactory = (current) => {
+		const sessionCwd = currentSessionCwd;
+		const mentionPrefix = (lines: string[], cursorLine: number, cursorCol: number): string | undefined => {
+			const active = rehearsal;
+			if (!active || active.cwd !== sessionCwd) return undefined;
+			const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
+			const match = /^@([^\s]*)$/.exec(textBeforeCursor);
+			return match ? (match[1] ?? "") : undefined;
+		};
+		return {
+			triggerCharacters: ["@"],
+			async getSuggestions(lines, cursorLine, cursorCol, options) {
+				const typed = mentionPrefix(lines, cursorLine, cursorCol);
+				if (typed === undefined) return current.getSuggestions(lines, cursorLine, cursorCol, options);
+				const items: AutocompleteItem[] = buildMentionCompletions(rehearsal?.aiCharacters ?? [], typed);
+				if (items.length === 0) return null;
+				return { items, prefix: `@${typed}` };
+			},
+			applyCompletion(lines, cursorLine, cursorCol, item) {
+				const line = lines[cursorLine] ?? "";
+				const atIndex = line.lastIndexOf("@", cursorCol - 1);
+				const before = line.slice(0, atIndex);
+				const after = line.slice(cursorCol);
+				const replacement = `@${item.value} `;
+				const newLines = [...lines];
+				newLines[cursorLine] = `${before}${replacement}${after}`;
+				return { lines: newLines, cursorLine, cursorCol: before.length + replacement.length };
+			},
+			shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+				if (mentionPrefix(lines, cursorLine, cursorCol) !== undefined) return false;
+				return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? false;
+			},
+		};
+	};
 	pi.on("session_start", (_event, ctx) => {
 		systemPromptShown = false;
 		noAiChapter = undefined;
 		clearNoAiUi(ctx);
 		rehearsal = undefined;
 		clearRehearsalUi(ctx);
+		// 对戏 @点名 补全：仅交互模式；会话切换时 interactive mode 会清空 provider 包装并重新挂载
+		if (ctx.mode === "tui") {
+			currentSessionCwd = ctx.cwd;
+			ctx.ui.addAutocompleteProvider(buildRehearsalMentionProvider);
+		}
 	});
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (systemPromptShown || ctx.mode !== "tui") return;

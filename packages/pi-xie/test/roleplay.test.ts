@@ -7,18 +7,16 @@ import {
 	applyDefaultUserRole,
 	buildCastPrompt,
 	buildChapterProseInstruction,
+	buildMentionCompletions,
 	buildProseInstruction,
 	buildRoleplaySystemPrompt,
-	buildRoleplayWidget,
 	classifySpeakTarget,
 	countTranscriptLines,
 	deriveSceneStartSuggestion,
-	formatRoleLine,
 	isSilenceReply,
 	parseAiReplyLines,
 	parseCastResult,
 	parseSpeakAs,
-	type RehearsalContext,
 	readProse,
 	readRecordSegment,
 	readSegmentSceneStart,
@@ -42,6 +40,11 @@ afterEach(() => {
 describe("parseSpeakAs", () => {
 	test("extracts a role prefix", () => {
 		expect(parseSpeakAs("@张三 你来了。")).toEqual({ roleName: "张三", text: "你来了。" });
+	});
+
+	test("parses a bare mention as a role with empty text", () => {
+		expect(parseSpeakAs("@千夏")).toEqual({ roleName: "千夏", text: "" });
+		expect(parseSpeakAs("@千夏  ")).toEqual({ roleName: "千夏", text: "" });
 	});
 
 	test("keeps plain text unchanged", () => {
@@ -344,6 +347,24 @@ describe("isSilenceReply", () => {
 	});
 });
 
+describe("buildMentionCompletions", () => {
+	const aiCharacters = [
+		{ id: "qianxia", name: "千夏" },
+		{ id: "nangongyu", name: "南宫羽" },
+	];
+
+	test("filters AI characters by the typed prefix", () => {
+		expect(buildMentionCompletions(aiCharacters, "南").map((item) => item.value)).toEqual(["南宫羽"]);
+		expect(buildMentionCompletions(aiCharacters, "").map((item) => item.value)).toEqual(["千夏", "南宫羽"]);
+		expect(buildMentionCompletions(aiCharacters, "爱")).toEqual([]);
+	});
+
+	test("labels each completion as a role mention", () => {
+		const items = buildMentionCompletions(aiCharacters, "千");
+		expect(items).toEqual([{ value: "千夏", label: "千夏", description: "点名该角色回应" }]);
+	});
+});
+
 describe("deriveSceneStartSuggestion", () => {
 	test("returns the last paragraph of the latest chapter", () => {
 		writeChapter(cwd, "第一段内容。\n\n第二段：两人爬山。");
@@ -376,6 +397,7 @@ describe("countTranscriptLines and conversion instructions", () => {
 		expect(instruction).toContain("人物-人物互动");
 		expect(instruction).toContain("人物-场景互动");
 		expect(instruction).toContain("不要出现「user:」或方括号标签");
+		expect(instruction).toContain("点名指令，不是台词");
 		expect(instruction).toContain("[user:男主] 到了。");
 	});
 
@@ -400,42 +422,6 @@ describe("buildProseInstruction", () => {
 		expect(instruction).toContain("replace 参数请传 true");
 		expect(instruction).toContain("[林晚] 别动。");
 		expect(instruction).toContain("深夜急诊室");
-	});
-});
-
-describe("buildRoleplayWidget", () => {
-	test("stays within the 10-line widget budget and lists all AI roles", () => {
-		const segment = Array.from({ length: 15 }, (_, index) => ({
-			speaker: index % 2 === 0 ? "林晚" : "你",
-			text: `第${index + 1}句`,
-			user: index % 2 === 1,
-		}));
-		const state = {
-			cwd,
-			sceneId: "scene",
-			sceneName: "早饭餐桌",
-			aiCharacters: [
-				{ id: "lin", name: "林晚" },
-				{ id: "zhi", name: "知遥" },
-			],
-			userRoleName: undefined,
-			recordPath: "",
-			prosePath: "",
-			sceneStart: "三人坐下。",
-			segment,
-			proseWatermark: 0,
-			autoProse: false,
-		} satisfies RehearsalContext;
-
-		const widget = buildRoleplayWidget(state);
-		expect(widget.length).toBeLessThanOrEqual(10);
-		expect(widget[0]).toContain("[对戏 · 早饭餐桌 · AI：林晚、知遥");
-		expect(widget[1]).toContain("已省略更早 8 句");
-		expect(widget).toContain(formatRoleLine(segment[14]!));
-		expect(widget).not.toContain("[林晚] 第1句");
-		expect(widget.at(-1)).toContain("/重说");
-		expect(widget.at(-1)).toContain("/改台词");
-		expect(widget.at(-1)).toContain("@角色名");
 	});
 });
 

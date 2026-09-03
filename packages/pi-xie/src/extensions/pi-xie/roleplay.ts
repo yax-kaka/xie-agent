@@ -173,9 +173,9 @@ export function writeProse(path: string, content: string, replace: boolean): str
 	return path;
 }
 
-/** 解析「@角色 台词」前缀；无前缀时保持当前扮演角色。 */
+/** 解析「@角色 台词」前缀（裸「@角色」也生效，台词为空）；无前缀时保持当前扮演角色。 */
 export function parseSpeakAs(raw: string): { roleName?: string; text: string } {
-	const match = raw.match(/^@([^\s]+)\s+([\s\S]*)$/);
+	const match = raw.match(/^@([^\s]+)\s*([\s\S]*)$/);
 	if (!match) return { text: raw };
 	return { roleName: match[1]?.trim(), text: match[2] ?? "" };
 }
@@ -345,6 +345,20 @@ export function isSilenceReply(reply: string): boolean {
 	return normalized === "沉默" || normalized === "默";
 }
 
+/** @点名补全候选：行首「@」后按前缀过滤在场 AI 角色。 */
+export function buildMentionCompletions(
+	aiCharacters: readonly RehearsalParticipant[],
+	typedPrefix: string,
+): Array<{ value: string; label: string; description: string }> {
+	return aiCharacters
+		.filter((participant) => participant.name.startsWith(typedPrefix))
+		.map((participant) => ({
+			value: participant.name,
+			label: participant.name,
+			description: "点名该角色回应",
+		}));
+}
+
 // ============================================================================
 // AI 自动选角
 // ============================================================================
@@ -452,6 +466,7 @@ const FIDELITY_RULES = [
 	"- 记录里的动作神态与场景互动逐项还原成正文描写；叙述只负责把台词之间的动作/神态/环境串起来，不得用来替换或压缩台词。",
 	"- 在逐句保留的基础上把互动写充分、合理化：台词之间的人物-人物互动（距离与站位、谁靠近谁让开、视线躲闪、抬手又放下、递与接）和人物-场景互动（捏紧又松开的杯子、窗外雨声、灯影、温度与风），都要具体地落在正文里，让对话像发生在真实空间里；互动服务于人物情绪与剧情，不得改变台词内容与顺序，也不得编造记录之外的台词。",
 	"- 记录中的说话人（[user:…]、[…]）是剧本标签，可能只是「你」「男主」等临时称呼：正文里一律按真实人物身份落笔（姓名或限知视角下的称谓），不要出现「user:」或方括号标签。",
+	"- 以 @ 开头、除此之外没有其它内容的行（如「[user:策栖辞] @千夏」）是点名指令，不是台词：不要写进正文，也不要改写成「策栖辞唤了声千夏」之类的称呼叙述；正文里的称呼只能来自台词本身。",
 	"- 台词在正文里用引号与动作描写融合成自然段落，不要排成剧本行，也不要带「角色名：」前缀。",
 	"- 正文里的台词必须一条条与记录对应：模型倾向于把相似台词合并或删掉以省字数，这是错误行为。",
 ];
@@ -499,23 +514,6 @@ export function buildChapterProseInstruction(input: {
 		input.transcript,
 		"</对戏记录>",
 	].join("\n");
-}
-
-/** 编辑器上方 widget 内容：标题 + 本段最近若干行 + 提示行。
- *  扩展 widget 渲染上限为 10 行（InteractiveMode.MAX_WIDGET_LINES）：
- *  标题(1) + 可选省略标记(1) + 对戏行 + 提示(1)，因此最多显示 7-8 行。 */
-export function buildRoleplayWidget(state: RehearsalContext): string[] {
-	const needsOmission = state.segment.length > 8;
-	const visible = needsOmission ? state.segment.slice(-7) : state.segment;
-	const hiddenCount = state.segment.length - visible.length;
-	const userLabel = state.userRoleName ?? "旁白/自己";
-	const aiLabel = state.aiCharacters.map((participant) => participant.name).join("、");
-	return [
-		`[对戏 · ${state.sceneName} · AI：${aiLabel} · 你：${userLabel} · 本段 ${state.segment.length} 句]`,
-		...(needsOmission ? [`… 已省略更早 ${hiddenCount} 句`] : []),
-		...visible.map(formatRoleLine),
-		"[/对戏：退出/成文 · 输入 @角色名 台词 点名回应 · /扮演 <角色>：切换 · /重说：重生成 · /改台词：编辑 · /对戏成文：写入章节]",
-	];
 }
 
 /** 把本段记录序列化为提示词文本（不含最新用户行）。 */

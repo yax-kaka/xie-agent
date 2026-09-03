@@ -205,6 +205,30 @@ describe("pi-xie /对戏 command", () => {
 		expect(record).not.toContain("[绯雪]");
 	});
 
+	test("bare @点名 wakes the named character without recording a user line", async () => {
+		const { commands, inputHandler, runtime } = await loadExtension();
+		runtime.appendEntry = vi.fn();
+		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
+		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪", "知遥"], userRole: "策栖辞" })); // 选角
+		runSubAgent.mockResolvedValueOnce("知遥：……有。"); // 只有知遥被唤醒
+		runtime.runSubAgent = runSubAgent;
+		const { context, select, editor } = createCommandContext();
+		await enterWithAutoCast(select, editor, runSubAgent);
+		await commands.get("对戏")?.handler("", context);
+
+		await inputHandler(input("@知遥"), context);
+
+		expect(runSubAgent).toHaveBeenCalledTimes(2); // 选角 + 被点名的知遥（不记录用户行）
+		const turnCall = runSubAgent.mock.calls[1][0] as RoleplayRunOptions;
+		expect(turnCall.messages[0]?.content).toContain("该你说话了");
+		expect(turnCall.messages[0]?.content).toContain("不得沉默");
+
+		const record = readFileSync(recordPathFor(cwd, "早饭餐桌", ["知遥", "绯雪"]), "utf8");
+		expect(record).toContain("[知遥] ……有。");
+		expect(record).not.toContain("[user:策栖辞]");
+		expect(record).not.toContain("@知遥");
+	});
+
 	test("casts to a single AI role keep the legacy file name", async () => {
 		const { commands, inputHandler, runtime } = await loadExtension();
 		runtime.appendEntry = vi.fn();
