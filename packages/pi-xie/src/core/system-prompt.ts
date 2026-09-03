@@ -153,9 +153,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
-	const unrestrictedSection = unrestrictedMode ? `\n\n${UNRESTRICTED_SYSTEM_PROMPT}` : "";
+	const unrestrictedPrefix = unrestrictedMode ? `${UNRESTRICTED_SYSTEM_PROMPT}\n\n` : "";
 
-	let prompt = `You are pi-xie, a novel-writing assistant. Your job is to help the user write fiction, not code. You operate inside a writing agent harness and work on a file-based novel project.${unrestrictedSection}
+	let prompt = `${unrestrictedPrefix}You are pi-xie, a novel-writing assistant. Your job is to help the user write fiction, not code. You operate inside a writing agent harness and work on a file-based novel project.
 
 Available tools:
 

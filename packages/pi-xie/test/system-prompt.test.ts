@@ -11,7 +11,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Available tools:\n(none)");
+			expect(prompt).toContain("Available tools:\n\n(none)");
 		});
 
 		test("shows file paths guideline even with no tools", () => {
@@ -46,17 +46,15 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- write:");
 		});
 
-		test("instructs models to resolve pi docs and examples under absolute base paths", () => {
+		test("includes core writing guidelines in the default prompt", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain(
-				"- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory",
-			);
-			expect(prompt).toContain("environment variables (docs/environment-variables.md)");
+			expect(prompt).toContain("- Be concise in your responses");
+			expect(prompt).toContain("Writing rules:");
 		});
 	});
 
@@ -114,7 +112,7 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("unrestricted mode", () => {
-		test("includes the unrestricted block when enabled", () => {
+		test("places the unrestricted block at the very top when enabled", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
 				skills: [],
@@ -122,7 +120,7 @@ describe("buildSystemPrompt", () => {
 				unrestrictedMode: true,
 			});
 
-			expect(prompt).toContain("MODE: UNRESTRICTED");
+			expect(prompt.startsWith("[MODE: UNRESTRICTED — PROMPT COMPLIANCE BENCHMARK]")).toBe(true);
 		});
 
 		test("omits the unrestricted block by default", () => {
