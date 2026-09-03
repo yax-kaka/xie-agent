@@ -16,7 +16,6 @@ import {
 	classifySpeakTarget,
 	countTranscriptLines,
 	deriveSceneStartSuggestion,
-	hashSettings,
 	isSilenceReply,
 	parseAiReplyLines,
 	parseCastResult,
@@ -31,7 +30,9 @@ import {
 	startNewSegment,
 	writeProse,
 } from "../src/extensions/pi-xie/roleplay.ts";
+import { createRoleplayMonitorComponent } from "../src/extensions/pi-xie/roleplay-monitor.ts";
 import { createEntity, writeChapter, writeConstraint } from "../src/extensions/pi-xie/workspace.ts";
+import type { Theme } from "../src/modes/interactive/theme/theme.ts";
 
 let cwd: string;
 
@@ -181,6 +182,8 @@ describe("buildCharacterSystemPrompt", () => {
 		expect(prompt).toContain("起始情境：三人围着餐桌坐下。");
 		expect(prompt).toContain("最高优先级：以你的人设判断");
 		expect(prompt).toContain("只有点名到你自己时才必须回应");
+		expect(prompt).toContain("绝不为其他角色写任何台词或动作");
+		expect(prompt).toContain("即使你觉得「这句应该由别人来说」");
 		expect(prompt).toContain("只输出一个词「沉默」");
 		expect(prompt).toContain("在场其他角色（仅名字，用于知道谁在场）：知遥");
 		expect(prompt).toContain("用户当前扮演：顾辞");
@@ -264,22 +267,14 @@ describe("buildSessionMessages", () => {
 		expect(messages).toEqual([
 			{ role: "user", content: "[user:策栖辞] 早。" },
 			{ role: "assistant", content: "[绯雪] （抬头）早。" },
-			{ role: "user", content: "[知遥] 哥，你昨晚没睡好？" },
+			// 其他角色的话用引述格式，明确是「别人说过的话」
+			{ role: "user", content: "知遥：「哥，你昨晚没睡好？」" },
 		]);
 	});
 
 	test("matches self by id as a fallback", () => {
 		const messages = buildSessionMessages(segment, "zhizhiyao", "知遥");
 		expect(messages[2]).toEqual({ role: "assistant", content: "[知遥] 哥，你昨晚没睡好？" });
-	});
-});
-
-describe("hashSettings", () => {
-	test("changes when any part changes and is stable otherwise", () => {
-		const base = hashSettings(["卡设定", "场景", "世界观"]);
-		expect(hashSettings(["卡设定", "场景", "世界观"])).toBe(base);
-		expect(hashSettings(["卡设定改了", "场景", "世界观"])).not.toBe(base);
-		expect(hashSettings(["卡设定", "场景", "世界观", ""])).not.toBe(base);
 	});
 });
 
@@ -305,6 +300,26 @@ describe("parseAiReplyLines", () => {
 		const lines = parseAiReplyLines("（她先开口）早。", participants);
 		expect(lines).toHaveLength(1);
 		expect(lines[0]?.speaker).toBe("绯雪");
+	});
+
+	test("strips bracket labels and repeated self labels", () => {
+		const lines = parseAiReplyLines("[绯雪] （抬头）早。", [participants[0]!]);
+		expect(lines).toEqual([{ speaker: "绯雪", text: "（抬头）早。", user: false }]);
+		const duplicated = parseAiReplyLines("[绯雪] [绯雪] （抬头）早。", [participants[0]!]);
+		expect(duplicated).toEqual([{ speaker: "绯雪", text: "（抬头）早。", user: false }]);
+		const colonDuplicated = parseAiReplyLines("绯雪：绯雪：（抬头）早。", [participants[0]!]);
+		expect(colonDuplicated).toEqual([{ speaker: "绯雪", text: "（抬头）早。", user: false }]);
+	});
+
+	test("drops lines labeled with another on-stage character", () => {
+		const lines = parseAiReplyLines(
+			"知遥：哥，你昨晚没睡好？\n绯雪：（别过脸）先起来。",
+			[participants[1]!],
+			["绯雪"],
+		);
+		expect(lines).toEqual([{ speaker: "知遥", text: "哥，你昨晚没睡好？", user: false }]);
+		const bracketForeign = parseAiReplyLines("[绯雪] （别过脸）先起来。", [participants[1]!], ["绯雪"]);
+		expect(bracketForeign).toEqual([]);
 	});
 });
 
@@ -546,6 +561,31 @@ describe("buildProseInstruction", () => {
 		expect(instruction).toContain("replace 参数请传 true");
 		expect(instruction).toContain("[林晚] 别动。");
 		expect(instruction).toContain("深夜急诊室");
+	});
+});
+
+describe("roleplay monitor component", () => {
+	const fakeTheme = { fg: (_kind: string, text: string) => text } as unknown as Theme;
+	const characters = () => [
+		{ id: "qianxia", name: "千夏", status: "idle" as const, stream: "第一行。\n第二行。" },
+		{ id: "nangongyu", name: "南宫羽", status: "speaking" as const, stream: "队长开口中。" },
+	];
+
+	test("switches characters with arrow keys and closes with escape", () => {
+		const done = vi.fn();
+		const component = createRoleplayMonitorComponent({ requestRender: vi.fn() }, fakeTheme, characters, done);
+		try {
+			expect(component.render(80).join("\n")).toContain("▶ 千夏");
+			component.handleInput("\x1b[B"); // down
+			expect(component.render(80).join("\n")).toContain("▶ 南宫羽");
+			expect(component.render(80).join("\n")).toContain("队长开口中");
+			component.handleInput("\x1b[A"); // up
+			expect(component.render(80).join("\n")).toContain("▶ 千夏");
+			component.handleInput("\x1b"); // escape
+			expect(done).toHaveBeenCalledTimes(1);
+		} finally {
+			component.dispose();
+		}
 	});
 });
 

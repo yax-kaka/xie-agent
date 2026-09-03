@@ -1,4 +1,11 @@
-import type { Api, AssistantMessage, Context, Model, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	Model,
+	ModelsSimpleStreamOptions,
+	ThinkingLevel,
+} from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "./model-runtime.ts";
 
 export interface SubAgentMessage {
@@ -12,6 +19,8 @@ export interface RunSubAgentOptions {
 	model: Model<Api>;
 	/** 可选输出上限；不传时使用 provider 自己的输出上限。 */
 	maxTokens?: number;
+	/** 思考级别；不传时不显式设置（provider 默认）。 */
+	reasoning?: ThinkingLevel;
 	signal?: AbortSignal;
 }
 
@@ -64,6 +73,7 @@ export async function runSubAgent(
 	};
 	const requestOptions: ModelsSimpleStreamOptions = {
 		signal: options.signal,
+		...(options.reasoning !== undefined ? { reasoning: options.reasoning } : {}),
 		...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
 	};
 

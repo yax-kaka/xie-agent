@@ -27,6 +27,7 @@ export type {
 	// Re-exports
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	AppendCharacterAgentMessageOptions,
 	AppendEntryHandler,
 	// App keybindings (for custom editors)
 	AppKeybinding,
@@ -40,6 +41,8 @@ export type {
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	BuildSystemPromptOptions,
+	// Persistent character agents
+	CharacterAgentUpdate,
 	// Context
 	CompactOptions,
 	// Events - Agent
@@ -47,8 +50,11 @@ export type {
 	// Event Results
 	ContextEventResult,
 	ContextUsage,
+	ContinueCharacterAgentOptions,
+	CreateCharacterAgentOptions,
 	CustomToolCallEvent,
 	CustomToolResultEvent,
+	DisposeCharacterAgentOptions,
 	EditorFactory,
 	EditToolCallEvent,
 	EditToolResultEvent,
@@ -123,6 +129,7 @@ export type {
 	// Events - Resources
 	ResourcesDiscoverEvent,
 	ResourcesDiscoverResult,
+	RunCharacterAgentTurnOptions,
 	SendMessageHandler,
 	SendUserMessageHandler,
 	SessionBeforeCompactEvent,
@@ -141,6 +148,7 @@ export type {
 	SessionStartEvent,
 	SessionTreeEvent,
 	SetActiveToolsHandler,
+	SetCharacterAgentHistoryOptions,
 	SetLabelHandler,
 	SetModelHandler,
 	SetThinkingLevelHandler,

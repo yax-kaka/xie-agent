@@ -72,6 +72,31 @@ describe("runSubAgent", () => {
 		expect(options.signal).toBe(signal);
 	});
 
+	test("forwards the reasoning level (thinkingLevel parity with the main agent)", async () => {
+		const completeSimple = vi.fn().mockResolvedValue(assistantResponse("end_turn"));
+		const runtime = fakeRuntime({ completeSimple });
+
+		await runSubAgent(runtime, {
+			systemPrompt: "s",
+			messages: [],
+			model: fakeModel,
+			reasoning: "high",
+		});
+
+		const [, , options] = completeSimple.mock.calls[0] as [Model<Api>, unknown, { reasoning?: string }];
+		expect(options.reasoning).toBe("high");
+	});
+
+	test("omits reasoning when not provided", async () => {
+		const completeSimple = vi.fn().mockResolvedValue(assistantResponse("end_turn"));
+		const runtime = fakeRuntime({ completeSimple });
+
+		await runSubAgent(runtime, { systemPrompt: "s", messages: [], model: fakeModel });
+
+		const [, , options] = completeSimple.mock.calls[0] as [Model<Api>, unknown, { reasoning?: string }];
+		expect(options.reasoning).toBeUndefined();
+	});
+
 	test("passes multi-turn conversations through, including assistant messages", async () => {
 		const completeSimple = vi.fn().mockResolvedValue(assistantResponse("end_turn", "新回复"));
 		const runtime = fakeRuntime({ completeSimple });

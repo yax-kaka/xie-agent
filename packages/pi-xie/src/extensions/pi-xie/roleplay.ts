@@ -8,7 +8,6 @@
  * 多角色使用 <scene>-<ai1>-<ai2>.md（id 排序，幂等）。
  */
 
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
@@ -42,8 +41,12 @@ export interface RehearsalContext {
 	sceneStart: string;
 	/** 当前段的对戏行（不含历史段）。 */
 	segment: RoleLine[];
-	/** 每个 AI 角色的常驻会话（按角色 id 索引；内存态，退出对戏即弃，重开时从记录回放重建）。 */
-	characterSessions: Record<string, CharacterSession>;
+	/** 每个角色 agent 最近一次设置的 systemPrompt（变化时热更新）。 */
+	agentSystemPrompts: Record<string, string>;
+	/** 每个角色 agent 转录最后一条消息的角色（决定本轮用 continue 还是 prompt）。 */
+	agentLastRoles: Record<string, "user" | "assistant">;
+	/** 每个角色 agent 的实时活动（流式直播 widget 与监视面板共用）。 */
+	characterActivity: Record<string, { status: "idle" | "thinking" | "speaking"; stream: string }>;
 	/** 上次成文时 segment 的行数，用于自动成文节流。 */
 	proseWatermark: number;
 	autoProse: boolean;
@@ -256,15 +259,9 @@ export interface CharacterSystemPromptInput {
 }
 
 /**
- * 角色子代理的常驻会话：静态 systemPrompt（人物卡+设定+规则）+ 完整消息历史
- * （自己的台词为 assistant，其余为 user）+ 人设哈希（内容变化时热重建）。
+ * 角色子代理的常驻形态由核心层角色 agent 承载（真 agent 循环，自带转录状态）；
+ * 这里只提供静态 systemPrompt 与「记录回放为消息」的转换。
  */
-export interface CharacterSession {
-	participantId: string;
-	systemPrompt: string;
-	messages: SubAgentMessage[];
-	settingsHash: string;
-}
 
 /** 角色子代理系统提示词：只有本角色的卡 + 世界设定 + 场景（含起始情境）+ 对戏规则。 */
 export function buildCharacterSystemPrompt(input: CharacterSystemPromptInput): string {
@@ -289,7 +286,7 @@ export function buildCharacterSystemPrompt(input: CharacterSystemPromptInput): s
 		`[当前场景]\n${sceneLines.join("\n")}`,
 		"[对戏规则]",
 		[
-			"- 最高优先级：以你的人设判断此刻你会不会真的开口。只有点名到你自己时才必须回应；话题明确指向你、或按人设此刻必然出声时开口；别人被点名时，你保持沉默。",
+			"- 最高优先级：以你的人设判断此刻你会不会真的开口。只有点名到你自己时才必须回应；话题明确指向你、或按人设此刻必然出声时才开口；别人被点名、或场面明显该别人接话时，你只输出「沉默」，绝不为其他角色写任何台词或动作。",
 			"- 判断不清、可开可不开时保持沉默：只输出一个词「沉默」，不要输出任何其它内容；宁可少说，不要抢话。",
 			"- 每次只回应一小步：1-3 句台词配上适量动作神态，把节奏留给用户与在场其他人，不推进时间线跳跃。",
 			input.otherNames.length > 0
@@ -300,7 +297,8 @@ export function buildCharacterSystemPrompt(input: CharacterSystemPromptInput): s
 				: "- 导演模式：用户是旁白/导演，不扮演任何角色；用户消息是场景指示或旁白（如「绯雪端着粥进来」），不是角色的台词。你只判断自己该不该对这条指示接戏（谁更该开口让谁开，你不必每轮都出声），不要替导演编排别的角色，也不要在回应里假装接到新的指示。",
 			"- 每个角色的口吻、称呼习惯、彼此关系都要保持区分，严禁模仿其他角色口吻。",
 			"- 角色隔离：动作/神态括号里只能写你自己身体的动作、神态、感官与手上的物品；绝不把其他角色的身体特征、习惯动作或物品写进你的行（绯雪的眼睛/发梢/指尖、策知遥的习惯只属于她们自己，其他角色一律不得使用）。可以观察并回应对方（如「见她垂下眼」「听他脚步声近了」），但动作的主语永远是你自己；括号里避免用「她/他」做动作主语。",
-			"- 以剧本行格式输出，每行以角色名开头：角色名：（动作/神态/互动）台词。动作神态与场景互动可以是一行的前半，需要时也可单独成行（不带角色名的动作行会归入上一句）。",
+			"- 以剧本行格式输出，每行以你的名字开头：「名字：（动作/神态/互动）台词」或「[名字] （动作/神态/互动）台词」二选一，行首只写一次名字，不要重复；动作神态与场景互动可以是一行的前半，需要时也可单独成行（不带名字的动作行会归入上一句）。",
+			"- 每一行都只能是你自己的台词或动作；即使你觉得「这句应该由别人来说」，也只输出「沉默」，绝不要把别人的名字写进行首或替别人说话。",
 			"- 每轮都要有表现力：动作（抬手、转身、靠近）、神态（眼神、嘴角、耳根）、与场景或道具的互动（捏紧碗筷、望向窗外、摆弄桌上的东西），以及该角色能感知到的体感（呼吸、心跳、声音、气味、温度）。",
 			"- 情绪与心理用上述身体语言外化，这是角色的限知视角；不要用「她感到/她想」式第三人称叙述，不要写小说正文，不要总结性旁白。",
 			"- 从当前场景的「起始情境」继续，不要另起场景或回退时间线。",
@@ -315,6 +313,18 @@ export function buildCharacterSystemPrompt(input: CharacterSystemPromptInput): s
 	return sections.join("\n\n");
 }
 
+/**
+ * 单条记录行在该角色 agent 消息里的呈现：
+ * 自己的行保持剧本行格式（[名字] …，模型学到的输出格式）；
+ * 其他角色的话改成引述格式（名字：「…」），明确是「别人说过的话」而非待合写的剧本行。
+ */
+export function formatAgentMessage(line: RoleLine, selfId: string, selfName: string): string {
+	const isSelf = !line.user && (line.speaker === selfName || line.speaker === selfId);
+	if (isSelf) return formatRoleLine(line);
+	if (line.user) return formatRoleLine(line);
+	return `${line.speaker}：「${line.text}」`;
+}
+
 /** 把一段记录行回放成某角色的会话消息：自己的台词是 assistant，其余（用户/其他角色）是 user。 */
 export function buildSessionMessages(
 	segment: readonly RoleLine[],
@@ -323,27 +333,55 @@ export function buildSessionMessages(
 ): SubAgentMessage[] {
 	return segment.map((line) => {
 		const isSelf = !line.user && (line.speaker === selfName || line.speaker === selfId);
-		return { role: isSelf ? "assistant" : "user", content: formatRoleLine(line) };
+		return { role: isSelf ? "assistant" : "user", content: formatAgentMessage(line, selfId, selfName) };
 	});
 }
 
-/** 人设相关文本的稳定哈希：任一来源变化都会改变结果，用于触发 systemPrompt 热重建。 */
-export function hashSettings(parts: readonly string[]): string {
-	return createHash("sha1").update(parts.join("\u0000")).digest("hex");
+/** 直播 widget 内容：当前回应角色的状态与流式文本尾部（≤10 行，widget 上限内）。 */
+export function buildRoleplayLiveLines(
+	name: string,
+	status: "idle" | "thinking" | "speaking",
+	stream: string,
+): string[] {
+	const statusLabel = status === "thinking" ? "思考中…" : status === "speaking" ? "回应中…" : "最近回应";
+	const trimmed = stream.trim();
+	const tail = trimmed
+		? trimmed
+				.split(/\r?\n/)
+				.slice(-7)
+				.map((line) => `│ ${line}`)
+		: [];
+	return [`[${name} · ${statusLabel}]`, ...tail];
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
- * 解析子代理回复为对戏行：每行以「角色名：」开头 → 独立说话人行；
- * 无角色名前缀的动作/神态行 → 归入上一说话人；首个无法归并的行归给首个 AI 角色。
+ * 解析子代理回复为对戏行：
+ * - 「角色名：…」或「[角色名] …」开头 → 独立说话人行（标签剥掉；重复的自身标签也剥掉）；
+ * - 以其他在场角色名开头的行 → 替别人说话，丢弃；
+ * - 无标签的动作/神态行 → 归入上一说话人；首个无法归并的行归给首个 AI 角色。
  */
-export function parseAiReplyLines(reply: string, participants: readonly RehearsalParticipant[]): RoleLine[] {
+export function parseAiReplyLines(
+	reply: string,
+	participants: readonly RehearsalParticipant[],
+	otherNames: readonly string[] = [],
+): RoleLine[] {
 	const lines: RoleLine[] = [];
 	let lastSpeaker: string | undefined;
+	const isForeign = (name: string): boolean =>
+		otherNames.some((candidate) => candidate.trim().toLowerCase() === name.toLowerCase());
 	for (const raw of reply.split(/\r?\n/)) {
 		const text = raw.trim();
 		if (!text) continue;
-		const prefixMatch = text.match(/^([^\s（(【]{1,16})[：:]\s*([\s\S]*)$/);
-		const named = prefixMatch ? prefixMatch[1]!.trim() : undefined;
+		const colonMatch = text.match(/^([^\s（(【：:]{1,16})[：:]\s*([\s\S]*)$/);
+		const bracketMatch = text.match(/^[[【]([^\]】\s]{1,16})[\]】]\s*([\s\S]*)$/);
+		const labelMatch = colonMatch ?? bracketMatch;
+		const named = labelMatch?.[1]?.trim();
+		// 替其他在场角色说话（如知遥的子代理输出「绯雪：…」）：不是本角色的内容，丢弃
+		if (named && isForeign(named)) continue;
 		const matched = named
 			? participants.find(
 					(candidate) =>
@@ -352,7 +390,17 @@ export function parseAiReplyLines(reply: string, participants: readonly Rehearsa
 				)
 			: undefined;
 		if (matched) {
-			const content = (prefixMatch?.[2] ?? text).trim();
+			// 剥掉行首（可能重复的）自身标签：如「[策知遥] [策知遥] （…）」
+			const labelPattern = new RegExp(
+				`^(?:[\\[【]${escapeRegExp(matched.name)}[\\]】]|${escapeRegExp(matched.name)}[：:])\\s*`,
+			);
+			let content = (labelMatch?.[2] ?? text).trim();
+			for (let guard = 0; guard < 4; guard++) {
+				const stripped = content.replace(labelPattern, "");
+				if (stripped === content) break;
+				content = stripped;
+			}
+			content = content.trim();
 			if (content) {
 				lines.push({ speaker: matched.name, text: content, user: false });
 				lastSpeaker = matched.name;

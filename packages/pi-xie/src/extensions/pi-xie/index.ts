@@ -5,12 +5,12 @@ import { Type } from "typebox";
 import { isArmorBreakEnabled, setArmorBreakEnabled } from "../../core/armor-break.ts";
 import type {
 	AgentToolResult,
+	CharacterAgentUpdate,
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
 	ToolCallEvent,
 } from "../../core/extensions/index.ts";
-import type { SubAgentMessage } from "../../core/sub-agent.ts";
 import { isAutoWriteEnabled, setAutoWriteEnabled } from "./permissions.ts";
 import {
 	AUTO_PROSE_THRESHOLD_LINES,
@@ -21,15 +21,14 @@ import {
 	buildCharacterSystemPrompt,
 	buildProseInstruction,
 	buildRehearsalMentionProvider,
+	buildRoleplayLiveLines,
 	buildSessionMessages,
 	type CastResult,
-	type CharacterSession,
 	classifySpeakTarget,
 	DIRECTOR_CONTINUE_MESSAGE,
 	DIRECTOR_MAX_TURNS,
 	deriveSceneStartSuggestion,
 	formatRoleLine,
-	hashSettings,
 	isSilenceReply,
 	parseAiReplyLines,
 	parseCastResult,
@@ -48,6 +47,7 @@ import {
 	startNewSegment,
 	writeProse,
 } from "./roleplay.ts";
+import { createRoleplayMonitorComponent } from "./roleplay-monitor.ts";
 import { parseTavernCard } from "./tavern.ts";
 import { getDefaultUserRole, setDefaultUserRole } from "./user-role.ts";
 import {
@@ -197,6 +197,17 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	pi.registerEntryRenderer<{ text: string }>("roleplay-round", (entry, _options, theme) => {
 		return new Text(theme.fg("dim", `[子代理] ${entry.data?.text ?? ""}`), 0, 0);
 	});
+	pi.registerEntryRenderer<{ sceneName: string; lines: string[]; omitted: number }>(
+		"roleplay-resume",
+		(entry, _options, theme) => {
+			const sceneName = entry.data?.sceneName ?? "";
+			const lines = entry.data?.lines ?? [];
+			const omitted = entry.data?.omitted ?? 0;
+			const head = theme.fg("dim", `[对戏续写 · ${sceneName}${omitted > 0 ? ` · 已省略更早 ${omitted} 句` : ""}]`);
+			const body = lines.map((line) => theme.fg("dim", line)).join("\n");
+			return new Text(`${head}${body ? `\n${body}` : ""}`, 0, 0);
+		},
+	);
 
 	let systemPromptShown = false;
 	let noAiChapter: { cwd: string; file: string } | undefined;
@@ -236,6 +247,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	const clearRehearsalUi = (ctx: ExtensionContext) => {
 		lastRoundSummary = undefined;
 		ctx.ui.setStatus("roleplay", undefined);
+		ctx.ui.setWidget("roleplay-live", undefined);
 	};
 	const updateRehearsalUi = (ctx: ExtensionContext) => {
 		if (!rehearsal) return;
@@ -251,11 +263,8 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		pi.appendEntry("roleplay-line", { ...line });
 	};
 
-	/** 组装单个角色的静态系统提示词与人设哈希（卡片+场景+约束；对话历史走会话消息）。 */
-	const buildCharacterSystemPromptFor = (
-		current: RehearsalContext,
-		participant: RehearsalParticipant,
-	): { systemPrompt: string; settingsHash: string } => {
+	/** 组装单个角色的静态系统提示词（卡片+场景+约束；对话历史由角色 agent 转录承载）。 */
+	const buildCharacterSystemPromptFor = (current: RehearsalContext, participant: RehearsalParticipant): string => {
 		let entity: EntityRecord | undefined;
 		try {
 			entity = getEntity(current.cwd, "characters", participant.id);
@@ -278,97 +287,84 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		const otherNames = current.aiCharacters
 			.filter((candidate) => candidate.id !== participant.id)
 			.map((candidate) => candidate.name);
-		const worldview = readConstraint(current.cwd, "worldview");
-		const outline = readConstraint(current.cwd, "outline");
-		const timeline = readConstraint(current.cwd, "timeline");
-		const style = getEffectiveStyleText(current.cwd);
-		return {
-			systemPrompt: buildCharacterSystemPrompt({
-				character: card,
-				otherNames,
-				userRoleName: current.userRoleName,
-				sceneName: scene.name,
-				sceneBody: scene.body,
-				sceneStart: current.sceneStart,
-				worldview,
-				outline,
-				timeline,
-				style,
-				unrestricted: isArmorBreakEnabled(current.cwd),
-			}),
-			settingsHash: hashSettings([
-				card.body,
-				card.system ?? "",
-				scene.body,
-				current.sceneStart,
-				worldview,
-				outline,
-				timeline,
-				style,
-			]),
-		};
+		return buildCharacterSystemPrompt({
+			character: card,
+			otherNames,
+			userRoleName: current.userRoleName,
+			sceneName: scene.name,
+			sceneBody: scene.body,
+			sceneStart: current.sceneStart,
+			worldview: readConstraint(current.cwd, "worldview"),
+			outline: readConstraint(current.cwd, "outline"),
+			timeline: readConstraint(current.cwd, "timeline"),
+			style: getEffectiveStyleText(current.cwd),
+			unrestricted: isArmorBreakEnabled(current.cwd),
+		});
 	};
 
-	/** 取角色会话：不存在则按当前记录回放建会话；存在则热检查人设变化（动态加载人设）。 */
-	const ensureSession = (current: RehearsalContext, participant: RehearsalParticipant): CharacterSession => {
-		const existing = current.characterSessions[participant.id];
-		const { systemPrompt, settingsHash } = buildCharacterSystemPromptFor(current, participant);
-		if (!existing) {
-			const session: CharacterSession = {
-				participantId: participant.id,
+	/** 角色 agent 不存在则创建并按当前记录回放转录。 */
+	const ensureCharacterAgent = (current: RehearsalContext, participant: RehearsalParticipant): void => {
+		if (current.agentSystemPrompts[participant.id] !== undefined) return;
+		const systemPrompt = buildCharacterSystemPromptFor(current, participant);
+		pi.createCharacterAgent({ id: participant.id, systemPrompt });
+		pi.setCharacterAgentHistory({
+			id: participant.id,
+			messages: buildSessionMessages(current.segment, participant.id, participant.name),
+		});
+		current.agentSystemPrompts[participant.id] = systemPrompt;
+		const last = current.segment[current.segment.length - 1];
+		current.agentLastRoles[participant.id] =
+			last && !last.user && last.speaker === participant.name ? "assistant" : "user";
+	};
+
+	/** 按当前记录整体重建全部角色 agent 的转录（/改台词、/重说、新开一段后调用）。 */
+	const rebuildCharacterAgentTranscripts = (current: RehearsalContext): void => {
+		for (const participant of current.aiCharacters) {
+			const systemPrompt = buildCharacterSystemPromptFor(current, participant);
+			pi.setCharacterAgentHistory({
+				id: participant.id,
 				systemPrompt,
-				settingsHash,
 				messages: buildSessionMessages(current.segment, participant.id, participant.name),
-			};
-			current.characterSessions[participant.id] = session;
-			return session;
-		}
-		if (existing.settingsHash !== settingsHash) {
-			existing.systemPrompt = systemPrompt;
-			existing.settingsHash = settingsHash;
-		}
-		return existing;
-	};
-
-	/** 按当前记录整体重建全部会话（/改台词、/重说、新开一段后调用）。 */
-	const rebuildAllSessions = (current: RehearsalContext): void => {
-		for (const participant of current.aiCharacters) {
-			const { systemPrompt, settingsHash } = buildCharacterSystemPromptFor(current, participant);
-			current.characterSessions[participant.id] = {
-				participantId: participant.id,
-				systemPrompt,
-				settingsHash,
-				messages: buildSessionMessages(current.segment, participant.id, participant.name),
-			};
+			});
+			current.agentSystemPrompts[participant.id] = systemPrompt;
+			const last = current.segment[current.segment.length - 1];
+			current.agentLastRoles[participant.id] =
+				last && !last.user && last.speaker === participant.name ? "assistant" : "user";
 		}
 	};
 
-	/** 把新台词注入所有角色会话：本人那行对本人是 assistant，对他人是 user。 */
-	const appendLineToSessions = (current: RehearsalContext, line: RoleLine): void => {
+	/** 用户行（含导演指示）注入所有角色 agent 的转录（不触发回应）。 */
+	const appendUserLineToAgents = (current: RehearsalContext, line: RoleLine): void => {
+		const content = formatRoleLine(line);
 		for (const participant of current.aiCharacters) {
-			const session = current.characterSessions[participant.id];
-			if (!session) continue;
-			const isSelf = !line.user && line.speaker === participant.name;
-			const message: SubAgentMessage = {
-				role: isSelf ? "assistant" : "user",
-				content: formatRoleLine(line),
-			};
-			session.messages.push(message);
+			pi.appendCharacterAgentMessage({ id: participant.id, message: { role: "user", content } });
+			current.agentLastRoles[participant.id] = "user";
 		}
 	};
 
-	/** 把不落记录的提示（如导演推进语）注入所有角色会话。 */
-	const appendNoticeToSessions = (current: RehearsalContext, text: string): void => {
+	/** 角色新台词以引述格式注入其他所有角色 agent 的转录（自己的转录已由 agent 运行自然包含）。 */
+	const appendLineToOtherAgents = (current: RehearsalContext, line: RoleLine, selfId: string): void => {
+		const content = `${line.speaker}：「${line.text}」`;
 		for (const participant of current.aiCharacters) {
-			const session = current.characterSessions[participant.id];
-			if (session) session.messages.push({ role: "user", content: text });
+			if (participant.id === selfId) continue;
+			pi.appendCharacterAgentMessage({ id: participant.id, message: { role: "user", content } });
+			current.agentLastRoles[participant.id] = "user";
 		}
+	};
+
+	/** 退出对戏时销毁全部角色 agent。 */
+	const disposeRehearsalAgents = (current: RehearsalContext): void => {
+		for (const participant of current.aiCharacters) {
+			pi.disposeCharacterAgent({ id: participant.id });
+		}
+		current.agentSystemPrompts = {};
+		current.agentLastRoles = {};
+		current.characterActivity = {};
 	};
 
 	/**
-	 * 生成单个角色的回应：基于其常驻会话（自己的 assistant 历史 + 他人的 user 消息），
-	 * 以人设自主判断该不该开口；沉默或失败返回 undefined。
-	 * forced：点名回合，临时追加强制回应指令（不写入会话历史）。
+	 * 生成单个角色的回应：基于其常驻 agent 转录（真 agent 循环），按人设自主判断该不该开口。
+	 * forced：点名回合，追加临时强制指令；否则转录末尾已是新内容时 continue，末尾是自己上句时以导演推进语 prompt。
 	 */
 	const generateCharacterTurn = async (
 		ctx: ExtensionContext,
@@ -376,31 +372,87 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		participant: RehearsalParticipant,
 		forced: boolean,
 	): Promise<RoleLine[] | undefined> => {
-		const session = ensureSession(current, participant);
-		const messages = forced
-			? [...session.messages, { role: "user" as const, content: "（点名：本轮你必须回应，不得沉默）" }]
-			: session.messages;
+		// 人设热加载：systemPrompt 变化时只热更新提示词，不动转录
+		const systemPrompt = buildCharacterSystemPromptFor(current, participant);
+		if (current.agentSystemPrompts[participant.id] !== systemPrompt) {
+			pi.setCharacterAgentHistory({ id: participant.id, systemPrompt });
+			current.agentSystemPrompts[participant.id] = systemPrompt;
+		}
+		// 实时活动状态：直播 widget 与监视面板共用
+		current.characterActivity[participant.id] = { status: "speaking", stream: "" };
+		let lastWidgetUpdate = 0;
+		const onUpdate = (update: CharacterAgentUpdate): void => {
+			if (update.type === "turn_start") return; // 无内容，不刷新 widget
+			const activity = current.characterActivity[participant.id];
+			if (!activity) return;
+			if (update.type === "text_delta") {
+				activity.status = "speaking";
+				activity.stream += update.text;
+			} else if (update.type === "thinking_delta") {
+				activity.status = "thinking";
+			} else if (update.type === "turn_end") {
+				activity.status = "idle";
+			}
+			const now = Date.now();
+			if (now - lastWidgetUpdate >= 80) {
+				lastWidgetUpdate = now;
+				ctx.ui.setWidget(
+					"roleplay-live",
+					buildRoleplayLiveLines(participant.name, activity.status, activity.stream),
+					{ placement: "belowEditor" },
+				);
+			}
+		};
+		let reply: string | undefined;
 		try {
-			const reply = await pi.runSubAgent({
-				systemPrompt: session.systemPrompt,
-				messages,
-				signal: ctx.signal,
-			});
-			if (!reply || isSilenceReply(reply)) return undefined;
-			const parsed = parseAiReplyLines(reply, [participant]);
-			// 回复的会话注入由 commitCharacterTurn 统一完成（本人 assistant、他人 user），此处不重复
-			return parsed.length > 0 ? parsed : undefined;
+			if (forced) {
+				reply = await pi.runCharacterAgentTurn({
+					id: participant.id,
+					message: "（点名：本轮你必须回应，不得沉默）",
+					signal: ctx.signal,
+					onUpdate,
+				});
+			} else if (current.agentLastRoles[participant.id] === "user") {
+				reply = await pi.continueCharacterAgent({ id: participant.id, signal: ctx.signal, onUpdate });
+			} else {
+				reply = await pi.runCharacterAgentTurn({
+					id: participant.id,
+					message: DIRECTOR_CONTINUE_MESSAGE,
+					signal: ctx.signal,
+					onUpdate,
+				});
+			}
 		} catch (error) {
 			ctx.ui.notify(`对戏失败：${error instanceof Error ? error.message : String(error)}`, "error");
-			return undefined;
 		}
+		// 回合结束：状态归位并做一次不节流的最终刷新（stream 保留为「最近回应」供监视面板查看）
+		const activity = current.characterActivity[participant.id];
+		if (activity) {
+			if (activity.status !== "idle") activity.status = "idle";
+			ctx.ui.setWidget("roleplay-live", buildRoleplayLiveLines(participant.name, activity.status, activity.stream), {
+				placement: "belowEditor",
+			});
+		}
+		// 无论回应/沉默/失败，agent 转录末尾都是（或仍是）assistant
+		current.agentLastRoles[participant.id] = "assistant";
+		if (!reply || isSilenceReply(reply)) return undefined;
+		const otherNames = current.aiCharacters
+			.filter((candidate) => candidate.id !== participant.id)
+			.map((candidate) => candidate.name);
+		const parsed = parseAiReplyLines(reply, [participant], otherNames);
+		return parsed.length > 0 ? parsed : undefined;
 	};
 
-	/** 记录回应行（文件 + segment + 会话注入）并刷新 UI；返回是否有产出。 */
-	const commitCharacterTurn = (current: RehearsalContext, ctx: ExtensionContext, lines: RoleLine[]): boolean => {
+	/** 记录回应行（文件 + segment + 其他角色 agent 注入）并刷新 UI；返回是否有产出。 */
+	const commitCharacterTurn = (
+		current: RehearsalContext,
+		ctx: ExtensionContext,
+		participant: RehearsalParticipant,
+		lines: RoleLine[],
+	): boolean => {
 		for (const line of lines) {
 			recordRoleplayLine(line);
-			appendLineToSessions(current, line);
+			appendLineToOtherAgents(current, line, participant.id);
 		}
 		if (lines.length > 0) updateRehearsalUi(ctx);
 		return lines.length > 0;
@@ -413,12 +465,12 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		participant: RehearsalParticipant,
 	): Promise<boolean> => {
 		const lines = await generateCharacterTurn(ctx, current, participant, true);
-		return lines ? commitCharacterTurn(current, ctx, lines) : false;
+		return lines ? commitCharacterTurn(current, ctx, participant, lines) : false;
 	};
 
 	/**
 	 * 一轮 = 全体 AI 角色按出场顺序串行各自判断是否接话。
-	 * 会话即上下文：后面的角色能看到前面角色同一轮刚产生的新台词。
+	 * 后面的角色能看到前面角色同一轮刚产生的新台词。
 	 * 无人接话时 produced=false。
 	 */
 	const runCharacterRound = async (
@@ -428,13 +480,14 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		const speakers: string[] = [];
 		const silent: string[] = [];
 		let produced = false;
+		// 轮内状态栏固定显示「对戏模式：场景 · 你：角色 · 最近一轮」；逐角色进度由直播 widget 展示
+		updateRehearsalUi(ctx);
 		for (const participant of current.aiCharacters) {
-			ctx.ui.setStatus("roleplay", `对戏中：${participant.name} 正在判断是否接话…`);
 			const lines = await generateCharacterTurn(ctx, current, participant, false);
 			if (lines) {
 				produced = true;
 				speakers.push(participant.name);
-				commitCharacterTurn(current, ctx, lines);
+				commitCharacterTurn(current, ctx, participant, lines);
 			} else {
 				silent.push(participant.name);
 			}
@@ -469,7 +522,6 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		const isDirector = current.userRoleName === undefined;
 		const roundBudget = isDirector ? DIRECTOR_MAX_TURNS : 1;
 		let roundsLeft = roundBudget;
-		let nextRoundMessage = text;
 
 		// 裸点名（如「@千夏」不带台词）：不记录用户行，只让该角色开口
 		if (!text && target?.kind !== "ai") {
@@ -481,18 +533,19 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		if (text) {
 			const line: RoleLine = { speaker: current.userRoleName ?? "旁白", text, user: true };
 			recordRoleplayLine(line);
-			appendLineToSessions(current, line);
+			appendUserLineToAgents(current, line);
 			updateRehearsalUi(ctx);
 		}
 
 		// @点名：只唤醒被点角色强制回应，不惊动其他角色
 		if (target?.kind === "ai") {
 			if (!text) {
-				// 裸点名：把「该你说话了」的提示注入该角色会话
-				ensureSession(current, target.participant).messages.push({
-					role: "user",
-					content: "（点名：该你说话了，请按当前局面自然回应）",
+				// 裸点名：把「该你说话了」的提示注入该角色 agent，再强制回应
+				pi.appendCharacterAgentMessage({
+					id: target.participant.id,
+					message: { role: "user", content: "（点名：该你说话了，请按当前局面自然回应）" },
 				});
+				current.agentLastRoles[target.participant.id] = "user";
 			}
 			const produced = await runCharacterTurn(ctx, current, target.participant);
 			lastRoundSummary = produced ? `${target.participant.name} 接话` : `${target.participant.name} 未回应`;
@@ -506,16 +559,12 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 				roundsLeft = 0;
 			} else {
 				roundsLeft -= 1;
-				nextRoundMessage = DIRECTOR_CONTINUE_MESSAGE;
 			}
 		}
 
 		for (let round = 0; round < roundsLeft; round++) {
 			if (!rehearsal || rehearsal !== current) break;
-			// 首轮的消息就是刚记录的用户行（已在会话里）；后续轮注入导演推进语
-			if (nextRoundMessage !== text) appendNoticeToSessions(current, nextRoundMessage);
 			const result = await runCharacterRound(ctx, current);
-			nextRoundMessage = DIRECTOR_CONTINUE_MESSAGE;
 			lastRoundSummary = result.produced
 				? `${result.speakers.join("、")} 接话${result.silent.length > 0 ? `（${result.silent.join("、")} 沉默）` : ""}`
 				: "无人接话";
@@ -529,6 +578,9 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			}
 			if (!result.produced) break;
 		}
+
+		// 本轮结束：收起直播 widget
+		ctx.ui.setWidget("roleplay-live", undefined);
 
 		// 自动成文节流（导演模式多回合合并结算一次）
 		if (
@@ -550,6 +602,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		systemPromptShown = false;
 		noAiChapter = undefined;
 		clearNoAiUi(ctx);
+		if (rehearsal) disposeRehearsalAgents(rehearsal);
 		rehearsal = undefined;
 		clearRehearsalUi(ctx);
 		// 对戏 @点名 补全：仅交互模式；会话切换时 interactive mode 会清空 provider 包装并重新挂载
@@ -601,6 +654,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 	pi.on("input", async (event, ctx) => {
 		if (!rehearsal || event.source !== "interactive") return { action: "continue" };
 		if (rehearsal.cwd !== ctx.cwd) {
+			disposeRehearsalAgents(rehearsal);
 			rehearsal = undefined;
 			clearRehearsalUi(ctx);
 			return { action: "continue" };
@@ -1083,12 +1137,14 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		if (rehearsal?.cwd === ctx.cwd) {
 			const action = await ctx.ui.select("对戏模式", ["退出对戏", "退出并成文", "新开一段对戏"]);
 			if (action === "退出对戏") {
+				disposeRehearsalAgents(rehearsal);
 				rehearsal = undefined;
 				clearRehearsalUi(ctx);
 				ctx.ui.notify("已退出对戏模式", "info");
 			} else if (action === "退出并成文") {
 				const sent = await runProseConversion(ctx, true);
 				if (sent) {
+					disposeRehearsalAgents(rehearsal);
 					rehearsal = undefined;
 					clearRehearsalUi(ctx);
 					ctx.ui.notify("已退出对戏模式，正文已交给写作 agent", "info");
@@ -1109,7 +1165,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 				rehearsal.segment = [];
 				rehearsal.proseWatermark = 0;
 				lastRoundSummary = undefined;
-				rebuildAllSessions(rehearsal);
+				rebuildCharacterAgentTranscripts(rehearsal);
 				updateRehearsalUi(ctx);
 				ctx.ui.notify("已新开一段对戏", "info");
 			}
@@ -1310,13 +1366,23 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			prosePath: prosePathFor(ctx.cwd, sceneId, aiIds),
 			sceneStart,
 			segment,
-			characterSessions: {},
+			agentSystemPrompts: {},
+			agentLastRoles: {},
+			characterActivity: {},
 			proseWatermark: 0,
 			autoProse: false,
 		};
-		// 常驻会话初始化：每个角色一条会话，并按当前段记录回放历史
+		// 常驻角色 agent：每个角色一个真 agent 循环，并按当前段记录回放转录
 		for (const participant of aiCharacters) {
-			ensureSession(rehearsal, participant);
+			ensureCharacterAgent(rehearsal, participant);
+		}
+		// 续写对戏：把最近几句历史显示出来，避免不知道写到哪
+		if (segment.length > 0) {
+			pi.appendEntry("roleplay-resume", {
+				sceneName: scene.name,
+				lines: segment.slice(-8).map(formatRoleLine),
+				omitted: Math.max(0, segment.length - 8),
+			});
 		}
 		noAiChapter = undefined;
 		clearNoAiUi(ctx);
@@ -1446,6 +1512,42 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		handler: speakOrderHandler,
 		autocompleteVisible: rehearsalOnlyVisible,
 		autocompletePriority: 755,
+	});
+
+	/** /对戏监视：Claude Code 式面板，↑/↓ 切换角色实时流式内容，Esc 关闭。 */
+	const monitorHandler = async (_args: string, ctx: ExtensionCommandContext) => {
+		if (!rehearsal || rehearsal.cwd !== ctx.cwd) {
+			ctx.ui.notify("当前不在对戏模式", "warning");
+			return;
+		}
+		if (!ctx.ui.custom) {
+			ctx.ui.notify("当前环境不支持监视面板", "warning");
+			return;
+		}
+		const current = rehearsal;
+		await ctx.ui.custom<void>((tui, theme, _kb, done) =>
+			createRoleplayMonitorComponent(
+				tui,
+				theme,
+				() =>
+					current.aiCharacters.map((participant) => {
+						const activity = current.characterActivity[participant.id];
+						return {
+							id: participant.id,
+							name: participant.name,
+							status: activity?.status ?? "idle",
+							stream: activity?.stream ?? "",
+						};
+					}),
+				() => done(),
+			),
+		);
+	};
+	pi.registerCommand("对戏监视", {
+		description: "打开角色 agent 监视面板（↑/↓ 切换角色，Esc 关闭）",
+		handler: monitorHandler,
+		autocompleteVisible: rehearsalOnlyVisible,
+		autocompletePriority: 754,
 	});
 
 	/** 设置项目级默认扮演角色（自动选角时生效；手动选择保持原逻辑）。 */
@@ -1645,8 +1747,8 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			kept,
 			current.aiCharacters.map((participant) => participant.id),
 		);
-		// 会话与记录保持一致：全部按新段重建，再让该角色强制重新回应
-		rebuildAllSessions(current);
+		// 角色 agent 转录与记录保持一致：全部按新段重建，再让该角色强制重新回应
+		rebuildCharacterAgentTranscripts(current);
 		updateRehearsalUi(ctx);
 		ctx.ui.notify(
 			`已撤回「${formatRoleLine(targetLine).slice(0, 40)}…」及其后内容，由 ${speakerParticipant.name} 重新回应`,
@@ -1716,7 +1818,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			current.segment,
 			current.aiCharacters.map((participant) => participant.id),
 		);
-		rebuildAllSessions(current);
+		rebuildCharacterAgentTranscripts(current);
 		updateRehearsalUi(ctx);
 		ctx.ui.notify("台词已更新", "info");
 	};

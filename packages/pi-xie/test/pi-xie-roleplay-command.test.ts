@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type {
+	CharacterAgentUpdate,
 	ExtensionCommandContext,
 	ExtensionContext,
 	ExtensionUIContext,
@@ -26,6 +27,7 @@ type RoleplayRunOptions = {
 	systemPrompt: string;
 	messages: Array<{ role: "user" | "assistant"; content: string }>;
 };
+type CharacterAgentMessage = { role: "user" | "assistant"; content: string };
 
 let cwd: string;
 
@@ -114,16 +116,89 @@ async function enterWithManualCast(
 	return { scene, feixue, zhizhiyao, ceqici };
 }
 
+/**
+ * 角色 agent 核心行为的轻量仿真：维护每个 agent 的转录，
+ * 按调用顺序从 replies 队列取回复；返回各动作的 mock 供断言。
+ */
+function installCharacterAgents(runtime: Awaited<ReturnType<typeof loadExtension>>["runtime"], replies: string[]) {
+	const transcripts = new Map<string, CharacterAgentMessage[]>();
+	const systemPrompts = new Map<string, string>();
+	const queue = [...replies];
+	const popReply = (): string | undefined => queue.shift();
+
+	const createCharacterAgent = vi.fn((options: { id: string; systemPrompt: string }) => {
+		transcripts.set(options.id, []);
+		systemPrompts.set(options.id, options.systemPrompt);
+	});
+	const setCharacterAgentHistory = vi.fn(
+		(options: { id: string; systemPrompt?: string; messages?: CharacterAgentMessage[] }) => {
+			if (options.systemPrompt !== undefined) systemPrompts.set(options.id, options.systemPrompt);
+			if (options.messages !== undefined)
+				transcripts.set(
+					options.id,
+					options.messages.map((m) => ({ ...m })),
+				);
+		},
+	);
+	const appendCharacterAgentMessage = vi.fn((options: { id: string; message: CharacterAgentMessage }) => {
+		transcripts.get(options.id)!.push({ ...options.message });
+	});
+	const runCharacterAgentTurn = vi.fn(
+		(options: { id: string; message: string; onUpdate?: (update: CharacterAgentUpdate) => void }) => {
+			const transcript = transcripts.get(options.id)!;
+			transcript.push({ role: "user", content: options.message });
+			const reply = popReply();
+			options.onUpdate?.({ type: "turn_start" });
+			if (reply !== undefined) {
+				options.onUpdate?.({ type: "text_delta", text: reply });
+				transcript.push({ role: "assistant", content: reply });
+			}
+			options.onUpdate?.({ type: "turn_end" });
+			return Promise.resolve(reply);
+		},
+	);
+	const continueCharacterAgent = vi.fn(
+		(options: { id: string; onUpdate?: (update: CharacterAgentUpdate) => void }) => {
+			const transcript = transcripts.get(options.id)!;
+			const reply = popReply();
+			options.onUpdate?.({ type: "turn_start" });
+			if (reply !== undefined) {
+				options.onUpdate?.({ type: "text_delta", text: reply });
+				transcript.push({ role: "assistant", content: reply });
+			}
+			options.onUpdate?.({ type: "turn_end" });
+			return Promise.resolve(reply);
+		},
+	);
+	const disposeCharacterAgent = vi.fn();
+
+	runtime.createCharacterAgent = createCharacterAgent;
+	runtime.setCharacterAgentHistory = setCharacterAgentHistory;
+	runtime.appendCharacterAgentMessage = appendCharacterAgentMessage;
+	runtime.runCharacterAgentTurn = runCharacterAgentTurn;
+	runtime.continueCharacterAgent = continueCharacterAgent;
+	runtime.disposeCharacterAgent = disposeCharacterAgent;
+
+	return {
+		transcripts,
+		systemPrompts,
+		createCharacterAgent,
+		setCharacterAgentHistory,
+		appendCharacterAgentMessage,
+		runCharacterAgentTurn,
+		continueCharacterAgent,
+		disposeCharacterAgent,
+	};
+}
+
 describe("pi-xie /对戏 command", () => {
-	test("auto-cast picks AI roles; every character judges the turn through its own isolated sub-agent", async () => {
+	test("auto-cast picks AI roles; every character judges through its own isolated persistent agent", async () => {
 		const { commands, inputHandler, runtime } = await loadExtension();
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
-		// 选角 → 全员判断轮：绯雪接话、知遥沉默
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪", "知遥"], userRole: "策栖辞" }));
-		runSubAgent.mockResolvedValueOnce("绯雪：（把粥碗推过来）先吃饭。");
-		runSubAgent.mockResolvedValueOnce("沉默");
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["绯雪：（把粥碗推过来）先吃饭。", "沉默"]);
 		const { context, select, editor, notify } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent);
 
@@ -138,37 +213,33 @@ describe("pi-xie /对戏 command", () => {
 				(call) => String(call[0]).includes("常驻角色子代理") && String(call[0]).includes("@角色名"),
 			),
 		).toBe(true);
+		// 每个角色各建一个 agent：系统提示词只有自己的卡（上下文隔离）
+		expect(agents.createCharacterAgent).toHaveBeenCalledTimes(2);
+		const feixueCreate = agents.createCharacterAgent.mock.calls.find(
+			(call) => (call[0] as { id: string }).id === "绯雪",
+		)?.[0] as { systemPrompt: string } | undefined;
+		expect(feixueCreate?.systemPrompt).toContain("名字：绯雪");
+		expect(feixueCreate?.systemPrompt).toContain("设定：红发，温柔而敏锐。");
+		expect(feixueCreate?.systemPrompt).toContain("在场其他角色（仅名字，用于知道谁在场）：知遥");
+		expect(feixueCreate?.systemPrompt).toContain("起始情境：三人在餐桌前坐下，粥还冒着热气。");
+		expect(feixueCreate?.systemPrompt).not.toContain("名字：知遥");
 
 		expect(await inputHandler(input("知遥，想吃什么？"), context)).toEqual({ action: "handled" });
-		expect(runSubAgent).toHaveBeenCalledTimes(3); // 选角 + 两个角色各自判断
-
-		// 绯雪的独立回合：只有她自己的卡，不出现知遥的人物卡（真正的上下文隔离）
-		const turnCall = runSubAgent.mock.calls[1][0] as RoleplayRunOptions;
-		expect(turnCall.systemPrompt).toContain("[人物卡]");
-		expect(turnCall.systemPrompt).toContain("名字：绯雪");
-		expect(turnCall.systemPrompt).toContain("设定：红发，温柔而敏锐。");
-		expect(turnCall.systemPrompt).not.toContain("名字：知遥");
-		expect(turnCall.systemPrompt).toContain("在场其他角色（仅名字，用于知道谁在场）：知遥");
-		expect(turnCall.systemPrompt).toContain("起始情境：三人在餐桌前坐下，粥还冒着热气。");
-		expect(turnCall.messages).toEqual([
+		expect(runSubAgent).toHaveBeenCalledTimes(1); // 只有选角用一次性子代理
+		// 串行：绯雪先判断（continue），知遥后判断
+		expect(agents.continueCharacterAgent).toHaveBeenCalledTimes(2);
+		expect((agents.continueCharacterAgent.mock.calls[0]?.[0] as { id: string }).id).toBe("绯雪");
+		expect((agents.continueCharacterAgent.mock.calls[1]?.[0] as { id: string }).id).toBe("知遥");
+		// 转录仿真：知遥的转录包含绯雪同一轮刚产生的新台词（引述格式）；自己的沉默也留在内部状态里
+		expect(agents.transcripts.get("知遥")).toEqual([
 			{ role: "user", content: "[user:策栖辞] 知遥，想吃什么？" },
-			// 会话引用在回合结束后已注入自己的 assistant 回复
-			{ role: "assistant", content: "[绯雪] （把粥碗推过来）先吃饭。" },
+			{ role: "user", content: "绯雪：「（把粥碗推过来）先吃饭。」" },
+			{ role: "assistant", content: "沉默" },
 		]);
-
-		// 知遥的常驻会话：同一轮里能看到绯雪刚产生的台词，然后按人设输出沉默
-		const zhiyaoCall = runSubAgent.mock.calls[2][0] as RoleplayRunOptions;
-		expect(zhiyaoCall.systemPrompt).toContain("名字：知遥");
-		expect(zhiyaoCall.systemPrompt).not.toContain("名字：绯雪");
-		expect(zhiyaoCall.systemPrompt).toContain("最高优先级：以你的人设判断");
-		expect(zhiyaoCall.messages).toEqual([
+		expect(agents.transcripts.get("绯雪")).toEqual([
 			{ role: "user", content: "[user:策栖辞] 知遥，想吃什么？" },
-			{ role: "user", content: "[绯雪] （把粥碗推过来）先吃饭。" },
+			{ role: "assistant", content: "绯雪：（把粥碗推过来）先吃饭。" },
 		]);
-		// 不再存在调度器子代理
-		expect(
-			runSubAgent.mock.calls.every((call) => !(call[0] as RoleplayRunOptions).systemPrompt.includes("轮次调度器")),
-		).toBe(true);
 		// 常驻子代理活动条目：谁接话、谁沉默
 		const appendEntry = runtime.appendEntry as ReturnType<typeof vi.fn>;
 		expect(
@@ -192,20 +263,26 @@ describe("pi-xie /对戏 command", () => {
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪", "知遥"], userRole: "策栖辞" })); // 选角
-		runSubAgent.mockResolvedValueOnce("知遥：……有。"); // 只有知遥被唤醒
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["知遥：……有。"]);
 		const { context, select, editor } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent);
 		await commands.get("对戏")?.handler("", context);
 
 		await inputHandler(input("@知遥 你昨晚没睡好？"), context);
 
-		expect(runSubAgent).toHaveBeenCalledTimes(2); // 选角 + 被点名的知遥（绯雪不参与）
-		const turnCall = runSubAgent.mock.calls[1][0] as RoleplayRunOptions;
-		expect(turnCall.systemPrompt).toContain("名字：知遥");
-		const contents = turnCall.messages.map((message) => message.content).join("\n");
-		expect(contents).toContain("[user:策栖辞] 你昨晚没睡好？");
-		expect(contents).toContain("不得沉默");
+		expect(runSubAgent).toHaveBeenCalledTimes(1); // 只有选角
+		// 用户行注入两个 agent（2 次），知遥的回复再注入绯雪（1 次）；只有知遥被唤醒，且带强制指令
+		expect(agents.appendCharacterAgentMessage).toHaveBeenCalledTimes(3);
+		const userLineAppends = agents.appendCharacterAgentMessage.mock.calls.filter((call) =>
+			String((call[0] as { message: CharacterAgentMessage }).message.content).includes("你昨晚没睡好？"),
+		);
+		expect(userLineAppends).toHaveLength(2);
+		expect(agents.runCharacterAgentTurn).toHaveBeenCalledTimes(1);
+		const forcedCall = agents.runCharacterAgentTurn.mock.calls[0]?.[0] as { id: string; message: string };
+		expect(forcedCall.id).toBe("知遥");
+		expect(forcedCall.message).toContain("不得沉默");
+		expect(agents.continueCharacterAgent).not.toHaveBeenCalled();
 		const appendEntry = runtime.appendEntry as ReturnType<typeof vi.fn>;
 		expect(
 			appendEntry.mock.calls.some(
@@ -224,19 +301,21 @@ describe("pi-xie /对戏 command", () => {
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪", "知遥"], userRole: "策栖辞" })); // 选角
-		runSubAgent.mockResolvedValueOnce("知遥：……有。"); // 只有知遥被唤醒
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["知遥：……有。"]);
 		const { context, select, editor } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent);
 		await commands.get("对戏")?.handler("", context);
 
 		await inputHandler(input("@知遥"), context);
 
-		expect(runSubAgent).toHaveBeenCalledTimes(2); // 选角 + 被点名的知遥（不记录用户行）
-		const turnCall = runSubAgent.mock.calls[1][0] as RoleplayRunOptions;
-		const contents = turnCall.messages.map((message) => message.content).join("\n");
-		expect(contents).toContain("该你说话了");
-		expect(contents).toContain("不得沉默");
+		// 裸点名提示只注入知遥，随后强制回应
+		const nudged = agents.appendCharacterAgentMessage.mock.calls.find(
+			(call) => (call[0] as { id: string }).id === "知遥",
+		)?.[0] as { message: CharacterAgentMessage } | undefined;
+		expect(nudged?.message.content).toContain("该你说话了");
+		expect(agents.runCharacterAgentTurn).toHaveBeenCalledTimes(1);
+		expect((agents.runCharacterAgentTurn.mock.calls[0]?.[0] as { id: string }).id).toBe("知遥");
 
 		const record = readFileSync(recordPathFor(cwd, "早饭餐桌", ["知遥", "绯雪"]), "utf8");
 		expect(record).toContain("[知遥] ……有。");
@@ -249,8 +328,8 @@ describe("pi-xie /对戏 command", () => {
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪"], userRole: "策栖辞" })); // 选角
-		runSubAgent.mockResolvedValueOnce("绯雪：……嗯。");
 		runtime.runSubAgent = runSubAgent;
+		installCharacterAgents(runtime, ["绯雪：……嗯。"]);
 		const { context, select, editor } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪"], userRole: "策栖辞" });
 		await commands.get("对戏")?.handler("", context);
@@ -268,9 +347,8 @@ describe("pi-xie /对戏 command", () => {
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪", "知遥"], userRole: "策栖辞" }));
-		runSubAgent.mockResolvedValueOnce("知遥：早。"); // 重排后知遥先开口
-		runSubAgent.mockResolvedValueOnce("沉默");
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["知遥：早。", "沉默"]);
 		const { context, select, editor, notify } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent);
 		await commands.get("对戏")?.handler("", context);
@@ -279,9 +357,8 @@ describe("pi-xie /对戏 command", () => {
 		expect(notify.mock.calls.some((call) => String(call[0]).includes("发言顺序：知遥 → 绯雪"))).toBe(true);
 
 		await inputHandler(input("早。"), context);
-		expect(runSubAgent).toHaveBeenCalledTimes(3); // 选角 + 知遥 + 绯雪（新顺序）
-		const firstTurn = runSubAgent.mock.calls[1][0] as RoleplayRunOptions;
-		expect(firstTurn.systemPrompt).toContain("名字：知遥");
+		// 重排后知遥先开口
+		expect((agents.continueCharacterAgent.mock.calls[0]?.[0] as { id: string }).id).toBe("知遥");
 		const record = readFileSync(recordPathFor(cwd, "早饭餐桌", ["知遥", "绯雪"]), "utf8");
 		expect(record).toContain("# 顺序：知遥,绯雪");
 		expect(record).toContain("[知遥] 早。");
@@ -292,6 +369,7 @@ describe("pi-xie /对戏 command", () => {
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn(async () => "嗯。");
 		runtime.runSubAgent = runSubAgent;
+		installCharacterAgents(runtime, []);
 		const { context, select, editor, notify } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent);
 		await commands.get("对戏")?.handler("", context);
@@ -305,14 +383,13 @@ describe("pi-xie /对戏 command", () => {
 		expect(record).toContain("# 顺序：知遥,绯雪");
 	});
 
-	test("re-entering a record restores the saved speaking order", async () => {
+	test("re-entering a record restores the saved speaking order and replays transcripts", async () => {
 		const { commands, inputHandler, runtime } = await loadExtension();
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪", "知遥"], userRole: "策栖辞" }));
-		runSubAgent.mockResolvedValueOnce("知遥：……有。"); // 恢复顺序后知遥先开口
-		runSubAgent.mockResolvedValueOnce("沉默");
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["知遥：……有。", "沉默"]);
 		const { context, select, editor } = createCommandContext();
 		const { scene, feixue, zhizhiyao } = await enterWithAutoCast(select, editor, runSubAgent);
 
@@ -322,22 +399,38 @@ describe("pi-xie /对戏 command", () => {
 		appendRoleLine(path, { speaker: "策栖辞", text: "早。", user: true });
 
 		await commands.get("对戏")?.handler("", context); // 续写这段对戏
-		await inputHandler(input("你昨晚没睡好？"), context);
+		// 续写时显示最近历史（[对戏续写] 条目）
+		const appendEntry = runtime.appendEntry as ReturnType<typeof vi.fn>;
+		expect(
+			appendEntry.mock.calls.some(
+				(call) =>
+					call[0] === "roleplay-resume" &&
+					String(call[1]?.sceneName).includes("早饭餐桌") &&
+					String(call[1]?.lines).includes("[user:策栖辞] 早。"),
+			),
+		).toBe(true);
+		// 进入时按记录回放转录
+		const replayCall = agents.setCharacterAgentHistory.mock.calls.find(
+			(call) => (call[0] as { id: string }).id === zhizhiyao.id,
+		)?.[0] as { messages?: CharacterAgentMessage[] } | undefined;
+		expect(replayCall?.messages).toEqual([{ role: "user", content: "[user:策栖辞] 早。" }]);
 
-		expect(runSubAgent).toHaveBeenCalledTimes(3); // 选角 + 知遥 + 绯雪
-		const firstTurn = runSubAgent.mock.calls[1][0] as RoleplayRunOptions;
-		expect(firstTurn.systemPrompt).toContain("名字：知遥");
-		expect(firstTurn.messages.map((message) => message.content).join("\n")).toContain("[user:策栖辞] 你昨晚没睡好？");
+		await inputHandler(input("你昨晚没睡好？"), context);
+		// 恢复顺序后知遥先开口
+		expect((agents.continueCharacterAgent.mock.calls[0]?.[0] as { id: string }).id).toBe(zhizhiyao.id);
+		expect(agents.transcripts.get(zhizhiyao.id)).toContainEqual({
+			role: "user",
+			content: "[user:策栖辞] 你昨晚没睡好？",
+		});
 	});
 
-	test("a character keeps its own turns as assistant messages across rounds (persistent session)", async () => {
+	test("a character keeps its own turns as assistant messages across rounds (persistent agent)", async () => {
 		const { commands, inputHandler, runtime } = await loadExtension();
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪"], userRole: "策栖辞" })); // 选角
-		runSubAgent.mockResolvedValueOnce("绯雪：第一句。"); // 第 1 轮
-		runSubAgent.mockResolvedValueOnce("绯雪：第二句。"); // 第 2 轮
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["绯雪：第一句。", "绯雪：第二句。"]);
 		const { context, select, editor } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪"], userRole: "策栖辞" });
 		await commands.get("对戏")?.handler("", context);
@@ -345,24 +438,21 @@ describe("pi-xie /对戏 command", () => {
 		await inputHandler(input("早。"), context);
 		await inputHandler(input("再说点。"), context);
 
-		const secondTurn = runSubAgent.mock.calls[2][0] as RoleplayRunOptions;
-		expect(secondTurn.messages).toEqual([
+		expect(agents.transcripts.get("绯雪")).toEqual([
 			{ role: "user", content: "[user:策栖辞] 早。" },
-			{ role: "assistant", content: "[绯雪] 第一句。" },
+			{ role: "assistant", content: "绯雪：第一句。" },
 			{ role: "user", content: "[user:策栖辞] 再说点。" },
-			// 回合结束后自己的回复也已注入
-			{ role: "assistant", content: "[绯雪] 第二句。" },
+			{ role: "assistant", content: "绯雪：第二句。" },
 		]);
 	});
 
-	test("edits to the character card hot-reload into the session on the next turn", async () => {
+	test("edits to the character card hot-reload into the agent on the next turn", async () => {
 		const { commands, inputHandler, runtime } = await loadExtension();
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪"], userRole: "策栖辞" })); // 选角
-		runSubAgent.mockResolvedValueOnce("绯雪：早。");
-		runSubAgent.mockResolvedValueOnce("绯雪：好。");
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["绯雪：早。", "绯雪：好。"]);
 		const { context, select, editor } = createCommandContext();
 		const { feixue } = await enterWithAutoCast(select, editor, runSubAgent, {
 			aiRoles: ["绯雪"],
@@ -375,8 +465,29 @@ describe("pi-xie /对戏 command", () => {
 		updateEntity(cwd, "characters", feixue.id, { body: "红发，温柔而敏锐，且怕狗。" });
 		await inputHandler(input("继续说。"), context);
 
-		const hotTurn = runSubAgent.mock.calls[2][0] as RoleplayRunOptions;
-		expect(hotTurn.systemPrompt).toContain("怕狗");
+		expect(agents.systemPrompts.get("绯雪")).toContain("怕狗");
+	});
+
+	test("turns stream live output to the widget and clear it afterwards", async () => {
+		const { commands, inputHandler, runtime } = await loadExtension();
+		runtime.appendEntry = vi.fn();
+		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
+		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪"], userRole: "策栖辞" }));
+		runtime.runSubAgent = runSubAgent;
+		installCharacterAgents(runtime, ["绯雪：先吃饭。"]);
+		const { context, select, editor, setWidget } = createCommandContext();
+		await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪"], userRole: "策栖辞" });
+		await commands.get("对戏")?.handler("", context);
+
+		await inputHandler(input("早。"), context);
+
+		const liveCalls = setWidget.mock.calls.filter((call) => call[0] === "roleplay-live" && call[1] !== undefined);
+		expect(liveCalls.length).toBeGreaterThan(0);
+		expect(String(liveCalls.at(-1)?.[1])).toContain("最近回应");
+		expect(String(liveCalls.at(-1)?.[1])).toContain("先吃饭");
+		expect(String(liveCalls.at(-1)?.[1])).not.toContain("对戏直播");
+		// 回合结束后收起
+		expect(setWidget.mock.calls.some((call) => call[0] === "roleplay-live" && call[1] === undefined)).toBe(true);
 	});
 
 	test("casts to a single AI role keep the legacy file name", async () => {
@@ -384,6 +495,7 @@ describe("pi-xie /对戏 command", () => {
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>(async () => "嗯。");
 		runtime.runSubAgent = runSubAgent;
+		installCharacterAgents(runtime, ["嗯。"]);
 		const { context, select, editor } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent, {
 			aiRoles: ["绯雪"],
@@ -404,6 +516,7 @@ describe("pi-xie /对戏 command", () => {
 			async () => "绯雪：（盛粥）喝点热的。",
 		);
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["绯雪：（盛粥）喝点热的。"]);
 		const { context, select, editor, notify } = createCommandContext();
 		await enterWithManualCast(select, editor, runSubAgent);
 
@@ -411,9 +524,9 @@ describe("pi-xie /对戏 command", () => {
 		expect(notify.mock.calls.some((call) => String(call[0]).includes("选角失败"))).toBe(true);
 
 		await inputHandler(input("知遥去哪了？"), context);
-		const turnCall = runSubAgent.mock.calls[1][0] as RoleplayRunOptions;
-		expect(turnCall.systemPrompt).toContain("最高优先级：以你的人设判断");
-		expect(turnCall.systemPrompt).not.toContain("知遥：高中生");
+		const feixuePrompt = agents.systemPrompts.get("绯雪");
+		expect(feixuePrompt).toContain("最高优先级：以你的人设判断");
+		expect(feixuePrompt).not.toContain("知遥：高中生");
 	});
 
 	test("offers creating a new scene even when scenes already exist", async () => {
@@ -421,8 +534,8 @@ describe("pi-xie /对戏 command", () => {
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪"], userRole: "策栖辞" }));
-		runSubAgent.mockResolvedValueOnce("绯雪：早。");
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["绯雪：早。"]);
 		const { context, select, editor, input: inputDialog } = createCommandContext();
 		setupEntities(); // 已有「早饭餐桌」场景
 
@@ -438,8 +551,7 @@ describe("pi-xie /对戏 command", () => {
 		expect(scenes.some((scene) => scene.name === "筑基次日的早餐")).toBe(true);
 
 		await inputHandler(input("绯雪，早。"), context);
-		const turnCall = runSubAgent.mock.calls[1][0] as RoleplayRunOptions;
-		expect(turnCall.systemPrompt).toContain("场景：筑基次日的早餐");
+		expect(agents.systemPrompts.get("绯雪")).toContain("场景：筑基次日的早餐");
 		const record = readFileSync(recordPathFor(cwd, "筑基次日的早餐", ["绯雪"]), "utf8");
 		expect(record).toContain("[绯雪] 早。");
 	});
@@ -449,6 +561,7 @@ describe("pi-xie /对戏 command", () => {
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn(async () => "嗯。");
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, []);
 		const { context, select, editor } = createCommandContext();
 
 		const visible = (name: string): boolean => commands.get(name)?.autocompleteVisible?.() ?? true;
@@ -462,10 +575,11 @@ describe("pi-xie /对戏 command", () => {
 		expect(visible("重说")).toBe(true);
 		expect(visible("改台词")).toBe(true);
 
-		// 退出后重新隐藏
+		// 退出后重新隐藏，且角色 agent 被销毁
 		select.mockResolvedValueOnce("退出对戏");
 		await commands.get("对戏")?.handler("", context);
 		expect(visible("对戏成文")).toBe(false);
+		expect(agents.disposeCharacterAgent).toHaveBeenCalledTimes(2);
 	});
 
 	test("/重说 lets the user pick which AI line to regenerate and truncates the rest", async () => {
@@ -473,9 +587,8 @@ describe("pi-xie /对戏 command", () => {
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪"], userRole: "策栖辞" })); // 选角
-		runSubAgent.mockResolvedValueOnce("绯雪：第一次回答。"); // 首轮
-		runSubAgent.mockResolvedValueOnce("绯雪：重生成的回答。"); // 重说
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["绯雪：第一次回答。", "绯雪：重生成的回答。"]);
 		const { context, select, editor } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪"], userRole: "策栖辞" });
 
@@ -489,23 +602,30 @@ describe("pi-xie /对戏 command", () => {
 		select.mockResolvedValueOnce("2 · [绯雪] 第一次回答。");
 		await commands.get("重说")?.handler("", context);
 
-		const retellCall = runSubAgent.mock.calls[2]?.[0] as RoleplayRunOptions | undefined;
-		const retellContents = retellCall?.messages.map((message) => message.content).join("\n") ?? "";
-		expect(retellContents).toContain("绯雪，你没事吧？"); // 触发点是原用户台词
-		expect(retellContents).toContain("不得沉默"); // 点名该角色重说
-		expect(retellContents).not.toContain("第一次回答"); // 会话已重建，不含被撤回的回答
+		// 重建转录：只保留用户台词；随后强制重新回应（取最后一次带 messages 的调用）
+		const replayCalls = agents.setCharacterAgentHistory.mock.calls.filter(
+			(call) =>
+				(call[0] as { id: string }).id === "绯雪" && (call[0] as { messages?: unknown }).messages !== undefined,
+		);
+		const replayCall = replayCalls.at(-1)?.[0] as { messages?: CharacterAgentMessage[] } | undefined;
+		expect(replayCall?.messages).toEqual([{ role: "user", content: "[user:策栖辞] 绯雪，你没事吧？" }]);
+		expect(replayCall?.messages).not.toContainEqual({ role: "assistant", content: "绯雪：第一次回答。" });
+		const forcedCall = agents.runCharacterAgentTurn.mock.calls[0]?.[0] as { id: string; message: string };
+		expect(forcedCall.id).toBe("绯雪");
+		expect(forcedCall.message).toContain("不得沉默");
+
 		const record = readFileSync(recordPath, "utf8");
 		expect(record).toContain("重生成的回答");
 		expect(record).not.toContain("第一次回答");
 	});
 
-	test("/改台词 edits and deletes a line in the record file", async () => {
+	test("/改台词 edits and deletes a line in the record file and rebuilds transcripts", async () => {
 		const { commands, inputHandler, runtime } = await loadExtension();
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪"], userRole: "策栖辞" }));
-		runSubAgent.mockResolvedValueOnce("绯雪：原话。");
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["绯雪：原话。"]);
 		const { context, select, editor } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪"], userRole: "策栖辞" });
 		await commands.get("对戏")?.handler("", context);
@@ -517,6 +637,11 @@ describe("pi-xie /对戏 command", () => {
 		await commands.get("改台词")?.handler("2", context);
 		expect(readFileSync(recordPath, "utf8")).toContain("改过的台词。");
 		expect(readFileSync(recordPath, "utf8")).not.toContain("原话。");
+		// 转录重建为编辑后的记录
+		expect(agents.transcripts.get("绯雪")).toEqual([
+			{ role: "user", content: "[user:策栖辞] 绯雪，早。" },
+			{ role: "assistant", content: "[绯雪] 改过的台词。" },
+		]);
 
 		// 清空内容 = 删除该行
 		editor.mockResolvedValueOnce("");
@@ -524,6 +649,7 @@ describe("pi-xie /对戏 command", () => {
 		const record = readFileSync(recordPath, "utf8");
 		expect(record).not.toContain("改过的台词。");
 		expect(record).toContain("[user:策栖辞] 绯雪，早。");
+		expect(agents.transcripts.get("绯雪")).toEqual([{ role: "user", content: "[user:策栖辞] 绯雪，早。" }]);
 	});
 
 	test("/对戏成文 writes into the chapter and continues the narration", async () => {
@@ -533,8 +659,8 @@ describe("pi-xie /对戏 command", () => {
 		runtime.sendUserMessage = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪"], userRole: "策栖辞" }));
-		runSubAgent.mockResolvedValueOnce("绯雪：先吃饭。");
 		runtime.runSubAgent = runSubAgent;
+		installCharacterAgents(runtime, ["绯雪：先吃饭。"]);
 		const { context, select, editor, input: inputDialog } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪"], userRole: "策栖辞" });
 		await commands.get("对戏")?.handler("", context);
@@ -557,8 +683,8 @@ describe("pi-xie /对戏 command", () => {
 		runtime.sendUserMessage = vi.fn();
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪"], userRole: "策栖辞" }));
-		runSubAgent.mockResolvedValue("明白。");
 		runtime.runSubAgent = runSubAgent;
+		installCharacterAgents(runtime, ["明白。", "明白。", "明白。", "明白。"]);
 		const { context, select, editor } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪"], userRole: "策栖辞" });
 		await commands.get("对戏")?.handler("", context);
@@ -581,6 +707,7 @@ describe("pi-xie /对戏 command", () => {
 		runtime.appendEntry = vi.fn();
 		const runSubAgent = vi.fn(async () => "嗯。");
 		runtime.runSubAgent = runSubAgent;
+		installCharacterAgents(runtime, []);
 		const { context, select, editor } = createCommandContext();
 		const { scene } = await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪"], userRole: null });
 		await commands.get("对戏")?.handler("", context);
@@ -607,45 +734,53 @@ describe("pi-xie /对戏 command", () => {
 		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
 		// 选角 → 第1轮[绯雪接话, 知遥沉默] → 第2轮[绯雪沉默, 知遥接话] → 第3轮[全沉默 → 停]
 		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪", "知遥"], userRole: null }));
-		runSubAgent.mockResolvedValueOnce("绯雪：（把粥碗推过来）早。");
-		runSubAgent.mockResolvedValueOnce("沉默");
-		runSubAgent.mockResolvedValueOnce("沉默");
-		runSubAgent.mockResolvedValueOnce("知遥：哥，你昨晚又没睡好？");
-		runSubAgent.mockResolvedValueOnce("沉默");
-		runSubAgent.mockResolvedValueOnce("沉默");
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, [
+			"绯雪：（把粥碗推过来）早。",
+			"沉默",
+			"沉默",
+			"知遥：哥，你昨晚又没睡好？",
+			"沉默",
+			"沉默",
+		]);
 		const { context, select, editor, setStatus } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪", "知遥"], userRole: null });
 		await commands.get("对戏")?.handler("", context);
 
 		await inputHandler(input("绯雪端着粥进来，看见他眼下发青。"), context);
 
-		expect(runSubAgent).toHaveBeenCalledTimes(7); // 选角 + 3 轮 × 2 角色
-		// 不再存在调度器子代理
+		expect(runSubAgent).toHaveBeenCalledTimes(1); // 只有选角
+		const turnCalls = [
+			...agents.continueCharacterAgent.mock.calls.map((call) => ({
+				kind: "continue",
+				call: call[0] as { id: string },
+			})),
+			...agents.runCharacterAgentTurn.mock.calls.map((call) => ({
+				kind: "turn",
+				call: call[0] as { id: string; message: string },
+			})),
+		];
+		expect(turnCalls).toHaveLength(6);
+		// 第 1 轮先绯雪后知遥（continue）
+		expect((agents.continueCharacterAgent.mock.calls[0]?.[0] as { id: string }).id).toBe("绯雪");
+		expect((agents.continueCharacterAgent.mock.calls[1]?.[0] as { id: string }).id).toBe("知遥");
+		// 后续轮以导演推进语 prompt
 		expect(
-			runSubAgent.mock.calls.every((call) => !(call[0] as RoleplayRunOptions).systemPrompt.includes("轮次调度器")),
+			agents.runCharacterAgentTurn.mock.calls.some((call) =>
+				(call[0] as { message: string }).message.includes("没有新的指示"),
+			),
 		).toBe(true);
-		// 绯雪第1轮：消息 = 你的导演指示（已标注说话人），只带自己的卡
-		const feixueTurn = runSubAgent.mock.calls[1][0] as RoleplayRunOptions;
-		expect(feixueTurn.messages[0]?.content).toContain("绯雪端着粥进来，看见他眼下发青。");
-		expect(feixueTurn.systemPrompt).toContain("名字：绯雪");
-		expect(feixueTurn.systemPrompt).toContain("导演模式");
-		expect(feixueTurn.systemPrompt).toContain("你只判断自己该不该对这条指示接戏");
-		expect(feixueTurn.systemPrompt).not.toContain("名字：知遥");
-		// 知遥第2轮：消息为导演推进语
-		const zhiyaoTurn = runSubAgent.mock.calls[4][0] as RoleplayRunOptions;
-		expect(zhiyaoTurn.messages.map((message) => message.content).join("\n")).toContain("没有新的指示");
-		expect(zhiyaoTurn.systemPrompt).toContain("名字：知遥");
-		expect(zhiyaoTurn.systemPrompt).not.toContain("名字：绯雪");
-		// 状态栏反馈：逐个角色判断中 + 谁接话谁沉默
-		expect(setStatus.mock.calls.some((call) => String(call[1]).includes("对戏中：绯雪 正在判断是否接话"))).toBe(true);
-		expect(setStatus.mock.calls.some((call) => String(call[1]).includes("对戏中：知遥 正在判断是否接话"))).toBe(true);
+		// 角色 agent 系统提示词：导演模式 + 只带自己的卡
+		expect(agents.systemPrompts.get("绯雪")).toContain("导演模式");
+		expect(agents.systemPrompts.get("绯雪")).toContain("名字：绯雪");
+		expect(agents.systemPrompts.get("绯雪")).not.toContain("名字：知遥");
+		// 状态栏反馈：轮末汇总谁接话谁沉默（进行中的逐角色状态由直播 widget 展示，不重复占状态栏）
 		expect(setStatus.mock.calls.some((call) => String(call[1]).includes("知遥 接话（绯雪 沉默）"))).toBe(true);
-		// 轮内串行：知遥第 1 轮的会话包含绯雪同一轮刚产生的新台词
-		const zhiyaoFirstTurn = runSubAgent.mock.calls[2][0] as RoleplayRunOptions;
-		expect(zhiyaoFirstTurn.messages.map((message) => message.content).join("\n")).toContain(
-			"[绯雪] （把粥碗推过来）早。",
-		);
+		// 轮内串行：知遥的转录包含绯雪同一轮刚产生的新台词（引述格式）
+		expect(agents.transcripts.get("知遥")).toContainEqual({
+			role: "user",
+			content: "绯雪：「（把粥碗推过来）早。」",
+		});
 		// 每轮的常驻子代理活动条目
 		const appendEntry = runtime.appendEntry as ReturnType<typeof vi.fn>;
 		const roundEntries = appendEntry.mock.calls
@@ -671,8 +806,8 @@ describe("pi-xie /对戏 command", () => {
 		runSubAgent.mockResolvedValueOnce(
 			JSON.stringify({ aiRoles: ["绯雪", "策栖辞"], userRole: "绯雪", reason: "猜错" }),
 		);
-		runSubAgent.mockResolvedValueOnce("绯雪：早。");
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["绯雪：早。"]);
 		const { context, select, editor } = createCommandContext();
 		await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪"], userRole: "策栖辞" });
 		await commands.get("对戏")?.handler("", context);
@@ -681,9 +816,8 @@ describe("pi-xie /对戏 command", () => {
 		expect(castCall.systemPrompt).toContain("aiRoles 严禁包含该 id");
 
 		await inputHandler(input("绯雪，早。"), context);
-		const turnCall = runSubAgent.mock.calls[1][0] as RoleplayRunOptions;
-		expect(turnCall.systemPrompt).toContain("用户当前扮演：策栖辞");
-		expect(turnCall.systemPrompt).not.toContain("导演模式：用户是旁白/导演");
+		expect(agents.systemPrompts.get("绯雪")).toContain("用户当前扮演：策栖辞");
+		expect(agents.systemPrompts.get("绯雪")).not.toContain("导演模式：用户是旁白/导演");
 		const record = readFileSync(recordPathFor(cwd, "早饭餐桌", ["绯雪"]), "utf8");
 		expect(record).toContain("[user:策栖辞] 绯雪，早。");
 	});
@@ -692,6 +826,7 @@ describe("pi-xie /对戏 command", () => {
 		const { commands, runtime } = await loadExtension();
 		runtime.appendEntry = vi.fn();
 		runtime.runSubAgent = vi.fn(async () => "嗯。");
+		installCharacterAgents(runtime, []);
 		const { context } = createCommandContext();
 		setupEntities();
 
@@ -710,6 +845,7 @@ describe("pi-xie /对戏 command", () => {
 			async () => "……进来再说。",
 		);
 		runtime.runSubAgent = runSubAgent;
+		const agents = installCharacterAgents(runtime, ["……进来再说。"]);
 		const { context, editor, input: inputDialog } = createCommandContext();
 
 		// 没有场景/人物：输入框就地创建，随后输入起始情境（无选角调用）
@@ -728,9 +864,9 @@ describe("pi-xie /对戏 command", () => {
 		expect(characters[0]?.name).toBe("绯雪");
 
 		expect(await inputHandler(input("绯雪，我有话跟你说。"), context)).toEqual({ action: "handled" });
-		const turnCall = runSubAgent.mock.calls[0][0] as RoleplayRunOptions;
-		expect(turnCall.systemPrompt).toContain("场景：绯雪房间门口");
-		expect(turnCall.systemPrompt).toContain("起始情境：他敲响房门，门开了。");
-		expect(turnCall.systemPrompt).toContain("用户当前扮演：策栖辞");
+		const feixuePrompt = agents.systemPrompts.get("绯雪");
+		expect(feixuePrompt).toContain("场景：绯雪房间门口");
+		expect(feixuePrompt).toContain("起始情境：他敲响房门，门开了。");
+		expect(feixuePrompt).toContain("用户当前扮演：策栖辞");
 	});
 });

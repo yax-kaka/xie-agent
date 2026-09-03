@@ -188,6 +188,12 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		sendUserMessage: notInitialized,
 		appendEntry: notInitialized,
 		runSubAgent: () => Promise.reject(new Error("Extension runtime not initialized")),
+		createCharacterAgent: notInitialized,
+		runCharacterAgentTurn: () => Promise.reject(new Error("Extension runtime not initialized")),
+		setCharacterAgentHistory: notInitialized,
+		disposeCharacterAgent: notInitialized,
+		appendCharacterAgentMessage: notInitialized,
+		continueCharacterAgent: () => Promise.reject(new Error("Extension runtime not initialized")),
 		setSessionName: notInitialized,
 		getSessionName: notInitialized,
 		setLabel: notInitialized,
@@ -344,6 +350,36 @@ function createExtensionAPI(
 		runSubAgent(options) {
 			runtime.assertActive();
 			return runtime.runSubAgent(options);
+		},
+
+		createCharacterAgent(options): void {
+			runtime.assertActive();
+			runtime.createCharacterAgent(options);
+		},
+
+		runCharacterAgentTurn(options) {
+			runtime.assertActive();
+			return runtime.runCharacterAgentTurn(options);
+		},
+
+		setCharacterAgentHistory(options): void {
+			runtime.assertActive();
+			runtime.setCharacterAgentHistory(options);
+		},
+
+		disposeCharacterAgent(options): void {
+			runtime.assertActive();
+			runtime.disposeCharacterAgent(options);
+		},
+
+		appendCharacterAgentMessage(options): void {
+			runtime.assertActive();
+			runtime.appendCharacterAgentMessage(options);
+		},
+
+		continueCharacterAgent(options) {
+			runtime.assertActive();
+			return runtime.continueCharacterAgent(options);
 		},
 
 		setSessionName(name: string): void {

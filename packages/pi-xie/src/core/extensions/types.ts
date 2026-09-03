@@ -1334,6 +1334,31 @@ export interface ExtensionAPI {
 	runSubAgent(options: RunSubAgentOptions): Promise<string | undefined>;
 
 	// =========================================================================
+	// Persistent Character Agents (对戏角色子代理)
+	// =========================================================================
+
+	/** 创建一个常驻角色 agent（真 agent 循环，自带转录状态）。id 会话内唯一。 */
+	createCharacterAgent(options: CreateCharacterAgentOptions): void;
+
+	/** 向角色 agent 追加一条新消息（user/assistant）并整体替换其转录（不触发回应）。 */
+	appendCharacterAgentMessage(options: AppendCharacterAgentMessageOptions): void;
+
+	/**
+	 * 让角色 agent 对一条新消息做一次 agent 循环，返回最后一条 assistant 文本
+	 * （undefined = 中断/失败/无文本）。
+	 */
+	runCharacterAgentTurn(options: RunCharacterAgentTurnOptions): Promise<string | undefined>;
+
+	/** 让角色 agent 从当前转录末尾继续一轮（末尾必须是 user/其他角色消息）。 */
+	continueCharacterAgent(options: ContinueCharacterAgentOptions): Promise<string | undefined>;
+
+	/** 整体替换角色 agent 的转录与（可选）系统提示词；省略 messages 则只热更新人设。 */
+	setCharacterAgentHistory(options: SetCharacterAgentHistoryOptions): void;
+
+	/** 销毁角色 agent。 */
+	disposeCharacterAgent(options: DisposeCharacterAgentOptions): void;
+
+	// =========================================================================
 	// Session Metadata
 	// =========================================================================
 
@@ -1595,6 +1620,60 @@ export interface RunSubAgentOptions {
 
 export type RunSubAgentHandler = (options: RunSubAgentOptions) => Promise<string | undefined>;
 
+export interface CharacterAgentMessage {
+	role: "user" | "assistant";
+	content: string;
+}
+
+export interface CreateCharacterAgentOptions {
+	/** Stable id scoped to the session; used to drive, rewrite, and dispose the agent. */
+	id: string;
+	systemPrompt: string;
+}
+
+export type CharacterAgentUpdate =
+	| { type: "turn_start" }
+	| { type: "text_delta"; text: string }
+	| { type: "thinking_delta"; text: string }
+	| { type: "turn_end" };
+
+export interface RunCharacterAgentTurnOptions {
+	id: string;
+	message: string;
+	signal?: AbortSignal;
+	/** 流式增量回调（text_delta/thinking_delta 为原始增量，扩展侧自行节流）。 */
+	onUpdate?: (update: CharacterAgentUpdate) => void;
+}
+
+export interface SetCharacterAgentHistoryOptions {
+	id: string;
+	systemPrompt?: string;
+	/** 整体替换转录；省略则只更新 systemPrompt（热加载人设）。 */
+	messages?: CharacterAgentMessage[];
+}
+
+export interface DisposeCharacterAgentOptions {
+	id: string;
+}
+
+export interface AppendCharacterAgentMessageOptions {
+	id: string;
+	message: CharacterAgentMessage;
+}
+
+export interface ContinueCharacterAgentOptions {
+	id: string;
+	signal?: AbortSignal;
+	onUpdate?: (update: CharacterAgentUpdate) => void;
+}
+
+export type CreateCharacterAgentHandler = (options: CreateCharacterAgentOptions) => void;
+export type RunCharacterAgentTurnHandler = (options: RunCharacterAgentTurnOptions) => Promise<string | undefined>;
+export type SetCharacterAgentHistoryHandler = (options: SetCharacterAgentHistoryOptions) => void;
+export type DisposeCharacterAgentHandler = (options: DisposeCharacterAgentOptions) => void;
+export type AppendCharacterAgentMessageHandler = (options: AppendCharacterAgentMessageOptions) => void;
+export type ContinueCharacterAgentHandler = (options: ContinueCharacterAgentOptions) => Promise<string | undefined>;
+
 export type SetSessionNameHandler = (name: string) => void;
 
 export type GetSessionNameHandler = () => string | undefined;
@@ -1658,6 +1737,12 @@ export interface ExtensionActions {
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
 	runSubAgent: RunSubAgentHandler;
+	createCharacterAgent: CreateCharacterAgentHandler;
+	runCharacterAgentTurn: RunCharacterAgentTurnHandler;
+	setCharacterAgentHistory: SetCharacterAgentHistoryHandler;
+	disposeCharacterAgent: DisposeCharacterAgentHandler;
+	appendCharacterAgentMessage: AppendCharacterAgentMessageHandler;
+	continueCharacterAgent: ContinueCharacterAgentHandler;
 	setSessionName: SetSessionNameHandler;
 	getSessionName: GetSessionNameHandler;
 	setLabel: SetLabelHandler;

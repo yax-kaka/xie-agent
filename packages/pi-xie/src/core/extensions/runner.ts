@@ -326,6 +326,12 @@ export class ExtensionRunner {
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
 		this.runtime.runSubAgent = actions.runSubAgent;
+		this.runtime.createCharacterAgent = actions.createCharacterAgent;
+		this.runtime.runCharacterAgentTurn = actions.runCharacterAgentTurn;
+		this.runtime.setCharacterAgentHistory = actions.setCharacterAgentHistory;
+		this.runtime.disposeCharacterAgent = actions.disposeCharacterAgent;
+		this.runtime.appendCharacterAgentMessage = actions.appendCharacterAgentMessage;
+		this.runtime.continueCharacterAgent = actions.continueCharacterAgent;
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setLabel = actions.setLabel;

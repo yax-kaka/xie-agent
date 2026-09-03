@@ -16,7 +16,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
-	Agent,
 	AgentEvent,
 	AgentMessage,
 	AgentState,
@@ -24,6 +23,7 @@ import type {
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
+import { Agent } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
@@ -95,6 +95,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import type { CharacterAgentUpdate } from "./extensions/types.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
@@ -310,6 +311,9 @@ export class AgentSession {
 	readonly settingsManager: SettingsManager;
 
 	private _scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+
+	/** 对戏角色 agent 注册表（会话级；dispose 时统一销毁）。 */
+	private readonly _characterAgents = new Map<string, Agent>();
 
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
@@ -845,6 +849,7 @@ export class AgentSession {
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
+			this.disposeAllCharacterAgents();
 		} catch {
 			// Dispose must succeed even if an abort hook throws.
 		}
@@ -855,6 +860,87 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		this._eventListeners = [];
 		cleanupSessionResources(this.sessionId);
+	}
+
+	/** 销毁全部角色 agent（会话销毁时调用）。 */
+	disposeAllCharacterAgents(): void {
+		for (const agent of this._characterAgents.values()) {
+			try {
+				agent.abort();
+			} catch {
+				// ignore
+			}
+		}
+		this._characterAgents.clear();
+	}
+
+	/** 取本次调用新增消息段（sinceIndex 起）里的最后一条 assistant 文本（无则 undefined）。 */
+	private extractCharacterAgentTextSince(agent: Agent, sinceIndex: number): string | undefined {
+		const messages = agent.state.messages;
+		for (let index = messages.length - 1; index >= sinceIndex; index--) {
+			const message = messages[index];
+			if (message?.role !== "assistant") continue;
+			const text = message.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("")
+				.trim();
+			return text.length > 0 ? text : undefined;
+		}
+		return undefined;
+	}
+
+	/** 订阅角色 agent 的流式事件并转发为扩展回调；返回退订函数。 */
+	private subscribeCharacterAgentUpdates(
+		agent: Agent,
+		onUpdate: ((update: CharacterAgentUpdate) => void) | undefined,
+	): () => void {
+		if (!onUpdate) return () => {};
+		return agent.subscribe((event) => {
+			try {
+				if (event.type === "turn_start") {
+					onUpdate({ type: "turn_start" });
+				} else if (event.type === "turn_end") {
+					onUpdate({ type: "turn_end" });
+				} else if (event.type === "message_update") {
+					const update = event.assistantMessageEvent;
+					if (update.type === "text_delta") {
+						onUpdate({ type: "text_delta", text: update.delta });
+					} else if (update.type === "thinking_delta") {
+						onUpdate({ type: "thinking_delta", text: update.delta });
+					}
+				}
+			} catch {
+				// 回调异常不能中断 agent 运行
+			}
+		});
+	}
+
+	/** 把扩展传入的会话消息转成带模型元数据的 AgentMessage（历史 assistant 轮只参与上下文）。 */
+	private convertCharacterAgentMessage(message: { role: "user" | "assistant"; content: string }): AgentMessage {
+		const content = [{ type: "text" as const, text: message.content }];
+		const timestamp = Date.now();
+		if (message.role === "assistant") {
+			const model = this.model;
+			return {
+				role: "assistant",
+				content,
+				api: model?.api ?? "anthropic-messages",
+				provider: model?.provider ?? "",
+				model: model?.id ?? "",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp,
+			};
+		}
+		return { role: "user", content, timestamp };
 	}
 
 	// =========================================================================
@@ -2402,8 +2488,105 @@ export class AgentSession {
 						messages: options.messages,
 						model,
 						maxTokens: options.maxTokens,
+						// thinkingLevel 与主写作 agent 一致
+						reasoning: this.thinkingLevel === "off" ? undefined : this.thinkingLevel,
 						signal: options.signal ?? this.agent.signal,
 					});
+				},
+				createCharacterAgent: ({ id, systemPrompt }) => {
+					const model = this.model;
+					if (!model) throw new Error("No active model to create a character agent");
+					this._characterAgents.get(id)?.abort();
+					const agent = new Agent({
+						initialState: {
+							systemPrompt,
+							model,
+							thinkingLevel: this.thinkingLevel,
+							tools: [],
+						},
+						streamFn: this.agent.streamFunction,
+						sessionId: `${this.sessionId}-rehearsal-${id}`,
+					});
+					this._characterAgents.set(id, agent);
+				},
+				runCharacterAgentTurn: async ({ id, message, signal, onUpdate }) => {
+					const agent = this._characterAgents.get(id);
+					if (!agent) throw new Error(`Character agent not found: ${id}`);
+					const abortOnce = () => {
+						try {
+							agent.abort();
+						} catch {
+							// ignore
+						}
+					};
+					if (signal?.aborted) return undefined;
+					const beforeCount = agent.state.messages.length;
+					const unsubscribe = this.subscribeCharacterAgentUpdates(agent, onUpdate);
+					signal?.addEventListener("abort", abortOnce, { once: true });
+					try {
+						await agent.prompt(message);
+						await agent.waitForIdle();
+					} catch {
+						// 中断/失败：失败轮是空 assistant，下方提取会返回 undefined
+					} finally {
+						signal?.removeEventListener("abort", abortOnce);
+						unsubscribe();
+					}
+					return agent.state.messages.length > beforeCount
+						? this.extractCharacterAgentTextSince(agent, beforeCount)
+						: undefined;
+				},
+				setCharacterAgentHistory: ({ id, systemPrompt, messages }) => {
+					const agent = this._characterAgents.get(id);
+					if (!agent) throw new Error(`Character agent not found: ${id}`);
+					if (agent.state.isStreaming) throw new Error(`Character agent is busy: ${id}`);
+					if (systemPrompt !== undefined) agent.state.systemPrompt = systemPrompt;
+					if (messages !== undefined) {
+						agent.state.messages = messages.map((message) => this.convertCharacterAgentMessage(message));
+					}
+				},
+				appendCharacterAgentMessage: ({ id, message }) => {
+					const agent = this._characterAgents.get(id);
+					if (!agent) throw new Error(`Character agent not found: ${id}`);
+					if (agent.state.isStreaming) throw new Error(`Character agent is busy: ${id}`);
+					agent.state.messages = [...agent.state.messages, this.convertCharacterAgentMessage(message)];
+				},
+				continueCharacterAgent: async ({ id, signal, onUpdate }) => {
+					const agent = this._characterAgents.get(id);
+					if (!agent) throw new Error(`Character agent not found: ${id}`);
+					const abortOnce = () => {
+						try {
+							agent.abort();
+						} catch {
+							// ignore
+						}
+					};
+					if (signal?.aborted) return undefined;
+					const beforeCount = agent.state.messages.length;
+					const unsubscribe = this.subscribeCharacterAgentUpdates(agent, onUpdate);
+					signal?.addEventListener("abort", abortOnce, { once: true });
+					try {
+						await agent.continue();
+						await agent.waitForIdle();
+					} catch {
+						// 中断/失败/最后一条是 assistant：没有新产出
+					} finally {
+						signal?.removeEventListener("abort", abortOnce);
+						unsubscribe();
+					}
+					return agent.state.messages.length > beforeCount
+						? this.extractCharacterAgentTextSince(agent, beforeCount)
+						: undefined;
+				},
+				disposeCharacterAgent: ({ id }) => {
+					const agent = this._characterAgents.get(id);
+					if (!agent) return;
+					try {
+						agent.abort();
+					} catch {
+						// ignore
+					}
+					this._characterAgents.delete(id);
 				},
 				setSessionName: (name) => {
 					this.setSessionName(name);
