@@ -7,7 +7,6 @@ import {
 	applyDefaultUserRole,
 	buildCastPrompt,
 	buildChapterProseInstruction,
-	buildPlannerPrompt,
 	buildProseInstruction,
 	buildRoleplaySystemPrompt,
 	buildRoleplayWidget,
@@ -15,9 +14,9 @@ import {
 	countTranscriptLines,
 	deriveSceneStartSuggestion,
 	formatRoleLine,
+	isSilenceReply,
 	parseAiReplyLines,
 	parseCastResult,
-	parsePlannerResult,
 	parseSpeakAs,
 	type RehearsalContext,
 	readProse,
@@ -134,6 +133,7 @@ describe("buildRoleplaySystemPrompt", () => {
 
 		const prompt = buildRoleplaySystemPrompt({
 			participants: [linwan, zhiyao],
+			otherNames: ["知遥"],
 			userRoleName: "顾辞",
 			sceneName: "早饭餐桌",
 			sceneBody: "窗外在下雨。",
@@ -153,8 +153,10 @@ describe("buildRoleplaySystemPrompt", () => {
 		expect(prompt).toContain("近未来医疗都市。");
 		expect(prompt).toContain("早饭餐桌");
 		expect(prompt).toContain("起始情境：三人围着餐桌坐下。");
-		expect(prompt).toContain("每一轮只以「最应该接话」的一个角色身份回应");
-		expect(prompt).toContain("台词直接点名谁");
+		expect(prompt).toContain("最高优先级：以你的人设判断");
+		expect(prompt).toContain("被点名时必须回应");
+		expect(prompt).toContain("只输出一个词「沉默」");
+		expect(prompt).toContain("在场其他角色（仅名字，用于知道谁在场）：知遥");
 		expect(prompt).toContain("用户当前扮演：顾辞");
 		expect(prompt).toContain("[知遥] 皮蛋瘦肉粥！");
 		expect(prompt).not.toContain("第一章");
@@ -164,6 +166,7 @@ describe("buildRoleplaySystemPrompt", () => {
 		const character = createEntity(cwd, "characters", { name: "甲", body: "设定" });
 		const prompt = buildRoleplaySystemPrompt({
 			participants: [character],
+			otherNames: [],
 			userRoleName: undefined,
 			sceneName: "场景",
 			sceneBody: "",
@@ -178,15 +181,16 @@ describe("buildRoleplaySystemPrompt", () => {
 		expect(prompt).not.toContain("[开场]");
 		expect(prompt).not.toContain("起始情境：");
 		expect(prompt).not.toContain("[MODE: UNRESTRICTED");
-		// 旁白/自己 = 导演模式规则
+		// 旁白/自己 = 导演模式规则：只判断自己该不该接戏
 		expect(prompt).toContain("导演模式");
-		expect(prompt).toContain("让多个在场角色按剧情顺序轮流回应");
+		expect(prompt).toContain("你只判断自己该不该对这条指示接戏");
 	});
 
 	test("places the unrestricted block at the very top when 破甲 is on", () => {
 		const character = createEntity(cwd, "characters", { name: "绯雪", body: "设定" });
 		const prompt = buildRoleplaySystemPrompt({
 			participants: [character],
+			otherNames: [],
 			userRoleName: undefined,
 			sceneName: "场景",
 			sceneBody: "",
@@ -206,6 +210,7 @@ describe("buildRoleplaySystemPrompt", () => {
 		const character = createEntity(cwd, "characters", { name: "策栖辞", body: "设定" });
 		const prompt = buildRoleplaySystemPrompt({
 			participants: [character],
+			otherNames: ["绯雪"],
 			userRoleName: "策栖辞",
 			sceneName: "场景",
 			sceneBody: "",
@@ -323,31 +328,19 @@ describe("cast helpers", () => {
 	});
 });
 
-describe("planner helpers", () => {
-	const characters = [
-		{ id: "feixue", name: "绯雪" },
-		{ id: "zhizhiyao", name: "知遥" },
-	];
-
-	test("buildPlannerPrompt lists characters and carries the transcript without role cards", () => {
-		const prompt = buildPlannerPrompt({
-			sceneName: "早饭餐桌",
-			sceneStart: "三人坐下。",
-			characters,
-			transcript: "[user:策栖辞] 今天想吃什么？",
-			userRoleName: "策栖辞",
-		});
-		expect(prompt).toContain("轮次调度器");
-		expect(prompt).toContain("- feixue：绯雪");
-		expect(prompt).toContain("[user:策栖辞] 今天想吃什么？");
-		expect(prompt).not.toContain("[人物卡]");
+describe("isSilenceReply", () => {
+	test("recognizes the silence marker with tolerated decorations", () => {
+		expect(isSilenceReply("沉默")).toBe(true);
+		expect(isSilenceReply("（沉默）")).toBe(true);
+		expect(isSilenceReply("“沉默”")).toBe(true);
+		expect(isSilenceReply("```\n沉默\n```")).toBe(true);
+		expect(isSilenceReply(" 默 ")).toBe(true);
 	});
 
-	test("parsePlannerResult distinguishes explicit end (null) from unknown speakers", () => {
-		expect(parsePlannerResult('{"speaker":"feixue"}', ["feixue", "zhizhiyao"])).toBe("feixue");
-		expect(parsePlannerResult('```json\n{"speaker":null}\n```', ["feixue"])).toBeNull();
-		expect(parsePlannerResult('{"speaker":"路人"}', ["feixue"])).toBeUndefined();
-		expect(parsePlannerResult("没有角色需要接话", ["feixue"])).toBeUndefined();
+	test("keeps real lines that merely mention silence", () => {
+		expect(isSilenceReply("绯雪：（沉默了两秒）……没事。")).toBe(false);
+		expect(isSilenceReply("")).toBe(false);
+		expect(isSilenceReply("没有需要接话的内容")).toBe(false);
 	});
 });
 
@@ -442,6 +435,7 @@ describe("buildRoleplayWidget", () => {
 		expect(widget).not.toContain("[林晚] 第1句");
 		expect(widget.at(-1)).toContain("/重说");
 		expect(widget.at(-1)).toContain("/改台词");
+		expect(widget.at(-1)).toContain("@角色名");
 	});
 });
 

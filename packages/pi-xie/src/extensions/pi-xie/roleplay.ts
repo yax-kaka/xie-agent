@@ -46,7 +46,7 @@ export interface RehearsalContext {
 
 export const AUTO_PROSE_THRESHOLD_LINES = 8;
 
-/** 导演模式（用户为旁白/自己）下，一条指示后最多执行的说话人回合数（每回合 = 调度器 + 单个角色子 agent）。 */
+/** 导演模式（用户为旁白/自己）下，一条指示后最多执行的全员判断轮数（一轮 = 全体 AI 角色并行各自判断一次）。 */
 export const DIRECTOR_MAX_TURNS = 3;
 
 /** 导演模式内部推进（非首回合）时使用的消息（不入记录文件）。 */
@@ -216,6 +216,8 @@ export function deriveSceneStartSuggestion(cwd: string): string {
 export interface RoleplayPromptInput {
 	/** 参与对戏的 AI 角色卡（≥1，顺序即出场顺序）。 */
 	participants: EntityRecord[];
+	/** 其他在场 AI 角色的名字（仅名字，用于让角色知道谁在场且不得代演）。 */
+	otherNames: string[];
 	userRoleName: string | undefined;
 	sceneName: string;
 	sceneBody: string;
@@ -257,25 +259,27 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 		`[当前场景]\n${sceneLines.join("\n")}`,
 		"[对戏规则]",
 		[
+			"- 最高优先级：以你的人设判断此刻你会不会真的开口。被点名时必须回应；话题明确指向你、或按人设此刻必然出声时开口。",
+			"- 判断不清、可开可不开时保持沉默：只输出一个词「沉默」，不要输出任何其它内容；宁可少说，不要抢话。",
+			"- 每次只回应一小步：1-3 句台词配上适量动作神态，把节奏留给用户与在场其他人，不推进时间线跳跃。",
+			input.otherNames.length > 0
+				? `- 在场其他角色（仅名字，用于知道谁在场）：${input.otherNames.join("、")}。你只能演你自己，严禁替他们说台词、写动作或代作决定。`
+				: "- 你只能演你自己，严禁替其他角色说台词、写动作或代作决定。",
 			input.userRoleName
-				? "- 每一轮只以「最应该接话」的一个角色身份回应一小步；台词直接点名谁（如「知遥，别闹」）则必须由被点名者回应。"
-				: "- 导演模式：用户是旁白/导演，不扮演任何角色；用户消息是场景指示或旁白（如「绯雪端着粥进来」），不是角色的台词。收到指示后，可以让多个在场角色按剧情顺序轮流回应（每行「角色名：」），把这一小场推到自然停顿为止，不要替导演总结，也不要在回应里假装接到新的指示。",
-			"- 每个角色的口吻、称呼习惯、彼此关系都要保持区分，严禁模仿其他角色口吻或替用户角色说话/行动。",
+				? `- 用户当前扮演：${input.userRoleName}。严禁替用户角色说话或行动。`
+				: "- 导演模式：用户是旁白/导演，不扮演任何角色；用户消息是场景指示或旁白（如「绯雪端着粥进来」），不是角色的台词。你只判断自己该不该对这条指示接戏（谁更该开口让谁开，你不必每轮都出声），不要替导演编排别的角色，也不要在回应里假装接到新的指示。",
+			"- 每个角色的口吻、称呼习惯、彼此关系都要保持区分，严禁模仿其他角色口吻。",
 			"- 角色隔离：动作/神态括号里只能写你自己身体的动作、神态、感官与手上的物品；绝不把其他角色的身体特征、习惯动作或物品写进你的行（绯雪的眼睛/发梢/指尖、策知遥的习惯只属于她们自己，其他角色一律不得使用）。可以观察并回应对方（如「见她垂下眼」「听他脚步声近了」），但动作的主语永远是你自己；括号里避免用「她/他」做动作主语。",
 			"- 以剧本行格式输出，每行以角色名开头：角色名：（动作/神态/互动）台词。动作神态与场景互动可以是一行的前半，需要时也可单独成行（不带角色名的动作行会归入上一句）。",
 			"- 每轮都要有表现力：动作（抬手、转身、靠近）、神态（眼神、嘴角、耳根）、与场景或道具的互动（捏紧碗筷、望向窗外、摆弄桌上的东西），以及该角色能感知到的体感（呼吸、心跳、声音、气味、温度）。",
 			"- 情绪与心理用上述身体语言外化，这是角色的限知视角；不要用「她感到/她想」式第三人称叙述，不要写小说正文，不要总结性旁白。",
-			"- 每轮推进一小步：1-3 句台词配上适量动作神态即可，把节奏留给用户，不推进时间线跳跃。",
-			input.userRoleName
-				? `- 用户当前扮演：${input.userRoleName}。严禁替用户角色说话或行动。`
-				: "- 严禁替导演代发指示；多个角色轮流时先开口的角色要承接导演刚给出的局面。",
 			"- 从当前场景的「起始情境」继续，不要另起场景或回退时间线。",
 			...(first
 				? [
 						`- 示例（先说话的角色假设是${first.name}）：${first.name}：（没急着接话，指尖在碗沿上划了一圈，目光落在他脸上）……先进来说。`,
 					]
 				: []),
-			"- 只输出剧本行本身，不要输出任何说明、前缀或 Markdown 格式。",
+			"- 只输出剧本行本身或「沉默」一词，不要输出任何说明、前缀或 Markdown 格式。",
 		].join("\n"),
 	];
 	if (input.transcript) {
@@ -329,60 +333,16 @@ export function parseAiReplyLines(reply: string, participants: readonly Rehearsa
 }
 
 // ============================================================================
-// 对戏调度器（决定下一句由哪个 AI 角色开口）
+// 沉默判定
 // ============================================================================
 
-/** 调度提示：根据最新记录决定下一个开口的在场 AI 角色。 */
-export function buildPlannerPrompt(input: {
-	sceneName: string;
-	sceneStart: string;
-	characters: Array<{ id: string; name: string }>;
-	transcript: string;
-	userRoleName: string | undefined;
-}): string {
-	const characterLines = input.characters.map((character) => `- ${character.id}：${character.name}`);
-	const userLabel = input.userRoleName ?? "旁白/导演";
-	return [
-		"你是对戏的轮次调度器，只负责决定下一句由谁开口，绝不自己扮演角色。",
-		`场景：${input.sceneName}${input.sceneStart ? `\n起始情境：${input.sceneStart}` : ""}`,
-		`用户扮演：${userLabel}（其最新消息在记录末尾）。`,
-		"在场 AI 角色（id：名字）：",
-		characterLines.join("\n"),
-		"规则：",
-		"- 若记录尾部有人点名某角色（如「知遥，别闹」），必须返回该角色 id。",
-		"- 否则返回「最应该接话」的角色 id：优先承接上一条消息/被提到的话题；避免同一角色连续开口（除非点名），让对话自然交替。",
-		"- 若话题已自然结束、没有角色需要接话（例如导演指示该收场），返回 null。",
-		"只输出一个 JSON 对象，不要输出其它内容：",
-		'{"speaker": "角色id" | null}',
-		"<本段对戏记录>",
-		input.transcript,
-		"</本段对戏记录>",
-	].join("\n");
-}
-
 /**
- * 解析调度结果：返回要开口的角色 id；null = 调度器明确收场（无人接话）；
- * undefined = 解析失败/说话人不在场（调用方可回退兜底）。
+ * 识别子代理的「不发言」标记：按要求只输出「沉默」（宽容括号/引号/代码围栏与空白）。
+ * 真正的台词行里出现「沉默」一词不会被误判（这里要求整条回复就是该标记）。
  */
-export function parsePlannerResult(text: string, knownIds: readonly string[]): string | null | undefined {
-	const stripped = text
-		.replace(/```(?:json)?\s*/gi, "")
-		.replace(/```/g, "")
-		.trim();
-	const start = stripped.indexOf("{");
-	const end = stripped.lastIndexOf("}");
-	if (start === -1 || end <= start) return undefined;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(stripped.slice(start, end + 1));
-	} catch {
-		return undefined;
-	}
-	if (typeof parsed !== "object" || parsed === null) return undefined;
-	const speaker = (parsed as Record<string, unknown>).speaker;
-	if (speaker === null) return null;
-	if (typeof speaker !== "string") return undefined;
-	return knownIds.includes(speaker) ? speaker : undefined;
+export function isSilenceReply(reply: string): boolean {
+	const normalized = reply.replace(/```(?:plaintext|text|plain)?/gi, "").replace(/[（()）「」『』"“”'’\s]/g, "");
+	return normalized === "沉默" || normalized === "默";
 }
 
 // ============================================================================
@@ -554,7 +514,7 @@ export function buildRoleplayWidget(state: RehearsalContext): string[] {
 		`[对戏 · ${state.sceneName} · AI：${aiLabel} · 你：${userLabel} · 本段 ${state.segment.length} 句]`,
 		...(needsOmission ? [`… 已省略更早 ${hiddenCount} 句`] : []),
 		...visible.map(formatRoleLine),
-		"[/对戏：退出/成文 · /扮演 <角色>：切换 · /重说：重生成 · /改台词：编辑 · /对戏成文：写入章节]",
+		"[/对戏：退出/成文 · 输入 @角色名 台词 点名回应 · /扮演 <角色>：切换 · /重说：重生成 · /改台词：编辑 · /对戏成文：写入章节]",
 	];
 }
 
