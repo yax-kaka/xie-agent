@@ -21,6 +21,9 @@
 - Extended `/对戏` to group rehearsal: multiple AI characters can be present (breakfast scenes with several speakers); the AI auto-casts the scene from the story state on entry, with manual multi-select as a fallback, and `@名字` prefixes steer the reply to a specific AI character. New scenes can be created from the scene picker at any time.
 - Added `/重说` to roll back and regenerate the last AI reply and `/改台词` to edit or delete a recorded line; both rewrite the record file immediately.
 - Mode-scoped commands (`/扮演`, `/对戏成文`, `/对戏自动`, `/重说`, `/改台词`) only appear in the `/` autocomplete list while a rehearsal is active; command entries support an autocomplete priority so high-frequency commands sort first (`/写作`, `/对戏`, `/破甲`, `/规则` lead the default list).
+- Each AI character now speaks through its own isolated sub-agent call (only that character's card is injected; other characters appear only as transcript lines), coordinated by a lightweight turn planner that decides who speaks next; `/重说` lets the user pick which character's line to regenerate from the last user trigger.
+- Added a project-level default user role (`/默认扮演`) that auto-cast must respect, and a director mode for the 旁白 role where one instruction drives several speaker turns.
+- 破甲 mode now places the unrestricted block at the very top of both the main writing agent and the roleplay sub-agent system prompts.
 
 ### Changed
 

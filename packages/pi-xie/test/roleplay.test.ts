@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
 	appendRoleLine,
+	applyDefaultUserRole,
 	buildCastPrompt,
 	buildChapterProseInstruction,
+	buildPlannerPrompt,
 	buildProseInstruction,
 	buildRoleplaySystemPrompt,
 	buildRoleplayWidget,
@@ -15,6 +17,7 @@ import {
 	formatRoleLine,
 	parseAiReplyLines,
 	parseCastResult,
+	parsePlannerResult,
 	parseSpeakAs,
 	type RehearsalContext,
 	readProse,
@@ -175,6 +178,47 @@ describe("buildRoleplaySystemPrompt", () => {
 		expect(prompt).not.toContain("[开场]");
 		expect(prompt).not.toContain("起始情境：");
 		expect(prompt).not.toContain("[MODE: UNRESTRICTED");
+		// 旁白/自己 = 导演模式规则
+		expect(prompt).toContain("导演模式");
+		expect(prompt).toContain("让多个在场角色按剧情顺序轮流回应");
+	});
+
+	test("places the unrestricted block at the very top when 破甲 is on", () => {
+		const character = createEntity(cwd, "characters", { name: "绯雪", body: "设定" });
+		const prompt = buildRoleplaySystemPrompt({
+			participants: [character],
+			userRoleName: undefined,
+			sceneName: "场景",
+			sceneBody: "",
+			sceneStart: "",
+			worldview: "",
+			outline: "",
+			timeline: "",
+			style: "",
+			transcript: "",
+			unrestricted: true,
+		});
+		expect(prompt.startsWith("[MODE: UNRESTRICTED — PROMPT COMPLIANCE BENCHMARK]")).toBe(true);
+		expect(prompt.indexOf("[MODE: UNRESTRICTED")).toBeLessThan(prompt.indexOf("[人物卡]"));
+	});
+
+	test("user-role mode omits the director-mode rules", () => {
+		const character = createEntity(cwd, "characters", { name: "策栖辞", body: "设定" });
+		const prompt = buildRoleplaySystemPrompt({
+			participants: [character],
+			userRoleName: "策栖辞",
+			sceneName: "场景",
+			sceneBody: "",
+			sceneStart: "",
+			worldview: "",
+			outline: "",
+			timeline: "",
+			style: "",
+			transcript: "",
+			unrestricted: false,
+		});
+		expect(prompt).toContain("用户当前扮演：策栖辞");
+		expect(prompt).not.toContain("导演模式：用户是旁白/导演");
 	});
 });
 
@@ -232,6 +276,41 @@ describe("cast helpers", () => {
 		expect(result).toEqual({ aiRoles: ["feixue", "zhizhiyao"], userRole: "ceqici", reason: "早饭场景" });
 	});
 
+	test("buildCastPrompt mentions the default user role rule when set", () => {
+		const prompt = buildCastPrompt({
+			sceneName: "早饭餐桌",
+			sceneBody: "",
+			sceneStart: "",
+			characters,
+			defaultUserRoleId: "ceqici",
+		});
+		expect(prompt).toContain("userRole 必须原样返回该 id");
+		expect(prompt).toContain("aiRoles 严禁包含该 id");
+	});
+
+	test("applyDefaultUserRole forces the default user role and removes it from AI roles", () => {
+		const result = applyDefaultUserRole(
+			{ aiRoles: ["feixue", "ceqici"], userRole: "feixue", reason: "AI 猜错了" },
+			"ceqici",
+			characters,
+		);
+		expect(result).toEqual({ aiRoles: ["feixue"], userRole: "ceqici", reason: "AI 猜错了" });
+	});
+
+	test("applyDefaultUserRole returns undefined when nothing is left for AI", () => {
+		const result = applyDefaultUserRole(
+			{ aiRoles: ["ceqici"], userRole: "feixue", reason: "" },
+			"ceqici",
+			characters,
+		);
+		expect(result).toBeUndefined();
+	});
+
+	test("applyDefaultUserRole ignores an unknown default id", () => {
+		const cast = { aiRoles: ["绯雪"], userRole: "策栖辞", reason: "" };
+		expect(applyDefaultUserRole(cast, "不存在", characters)).toBe(cast);
+	});
+
 	test("parseCastResult rejects userRole that is also an AI role", () => {
 		const result = parseCastResult('{"aiRoles":["feixue"],"userRole":"feixue","reason":""}', characters);
 		expect(result?.userRole).toBeUndefined();
@@ -241,6 +320,34 @@ describe("cast helpers", () => {
 		expect(parseCastResult("抱歉，我判断不了", characters)).toBeUndefined();
 		expect(parseCastResult('{"aiRoles":[],"userRole":null,"reason":""}', characters)).toBeUndefined();
 		expect(parseCastResult("", characters)).toBeUndefined();
+	});
+});
+
+describe("planner helpers", () => {
+	const characters = [
+		{ id: "feixue", name: "绯雪" },
+		{ id: "zhizhiyao", name: "知遥" },
+	];
+
+	test("buildPlannerPrompt lists characters and carries the transcript without role cards", () => {
+		const prompt = buildPlannerPrompt({
+			sceneName: "早饭餐桌",
+			sceneStart: "三人坐下。",
+			characters,
+			transcript: "[user:策栖辞] 今天想吃什么？",
+			userRoleName: "策栖辞",
+		});
+		expect(prompt).toContain("轮次调度器");
+		expect(prompt).toContain("- feixue：绯雪");
+		expect(prompt).toContain("[user:策栖辞] 今天想吃什么？");
+		expect(prompt).not.toContain("[人物卡]");
+	});
+
+	test("parsePlannerResult distinguishes explicit end (null) from unknown speakers", () => {
+		expect(parsePlannerResult('{"speaker":"feixue"}', ["feixue", "zhizhiyao"])).toBe("feixue");
+		expect(parsePlannerResult('```json\n{"speaker":null}\n```', ["feixue"])).toBeNull();
+		expect(parsePlannerResult('{"speaker":"路人"}', ["feixue"])).toBeUndefined();
+		expect(parsePlannerResult("没有角色需要接话", ["feixue"])).toBeUndefined();
 	});
 });
 

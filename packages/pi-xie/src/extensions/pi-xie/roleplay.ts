@@ -46,12 +46,11 @@ export interface RehearsalContext {
 
 export const AUTO_PROSE_THRESHOLD_LINES = 8;
 
-/** 导演模式（用户为旁白/自己）下，一条指示后额外自动推进的子代理回合数。 */
-export const DIRECTOR_FOLLOWUP_ROUNDS = 1;
+/** 导演模式（用户为旁白/自己）下，一条指示后最多执行的说话人回合数（每回合 = 调度器 + 单个角色子 agent）。 */
+export const DIRECTOR_MAX_TURNS = 3;
 
-/** 导演模式内部推进时使用的消息（不入记录文件）。 */
-export const DIRECTOR_CONTINUE_MESSAGE =
-	"（导演模式：没有新的指示，请在场角色按当前局面自然继续互动，直到这一小场自然告一段落）";
+/** 导演模式内部推进（非首回合）时使用的消息（不入记录文件）。 */
+export const DIRECTOR_CONTINUE_MESSAGE = "（导演模式：没有新的指示，请按当前局面自然继续互动，直到这一小场告一段落）";
 
 const SEGMENT_SEPARATOR = "\n---\n";
 const SCENE_START_PREFIX = "# 起始：";
@@ -262,6 +261,7 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 				? "- 每一轮只以「最应该接话」的一个角色身份回应一小步；台词直接点名谁（如「知遥，别闹」）则必须由被点名者回应。"
 				: "- 导演模式：用户是旁白/导演，不扮演任何角色；用户消息是场景指示或旁白（如「绯雪端着粥进来」），不是角色的台词。收到指示后，可以让多个在场角色按剧情顺序轮流回应（每行「角色名：」），把这一小场推到自然停顿为止，不要替导演总结，也不要在回应里假装接到新的指示。",
 			"- 每个角色的口吻、称呼习惯、彼此关系都要保持区分，严禁模仿其他角色口吻或替用户角色说话/行动。",
+			"- 角色隔离：动作/神态括号里只能写你自己身体的动作、神态、感官与手上的物品；绝不把其他角色的身体特征、习惯动作或物品写进你的行（绯雪的眼睛/发梢/指尖、策知遥的习惯只属于她们自己，其他角色一律不得使用）。可以观察并回应对方（如「见她垂下眼」「听他脚步声近了」），但动作的主语永远是你自己；括号里避免用「她/他」做动作主语。",
 			"- 以剧本行格式输出，每行以角色名开头：角色名：（动作/神态/互动）台词。动作神态与场景互动可以是一行的前半，需要时也可单独成行（不带角色名的动作行会归入上一句）。",
 			"- 每轮都要有表现力：动作（抬手、转身、靠近）、神态（眼神、嘴角、耳根）、与场景或道具的互动（捏紧碗筷、望向窗外、摆弄桌上的东西），以及该角色能感知到的体感（呼吸、心跳、声音、气味、温度）。",
 			"- 情绪与心理用上述身体语言外化，这是角色的限知视角；不要用「她感到/她想」式第三人称叙述，不要写小说正文，不要总结性旁白。",
@@ -272,7 +272,7 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 			"- 从当前场景的「起始情境」继续，不要另起场景或回退时间线。",
 			...(first
 				? [
-						`- 示例（先说话的角色假设是${first.name}）：${first.name}：（她没急着接话，手指在门框上轻轻刮了一下，目光落在他发白的脸色上）……先进来说。`,
+						`- 示例（先说话的角色假设是${first.name}）：${first.name}：（没急着接话，指尖在碗沿上划了一圈，目光落在他脸上）……先进来说。`,
 					]
 				: []),
 			"- 只输出剧本行本身，不要输出任何说明、前缀或 Markdown 格式。",
@@ -282,7 +282,8 @@ export function buildRoleplaySystemPrompt(input: RoleplayPromptInput): string {
 		sections.push("[本段对戏记录]", input.transcript);
 	}
 	if (input.unrestricted) {
-		sections.push(UNRESTRICTED_SYSTEM_PROMPT);
+		// 破甲块放在最上面，确保角色扮演时也先读到
+		sections.unshift(UNRESTRICTED_SYSTEM_PROMPT);
 	}
 	return sections.join("\n\n");
 }
@@ -325,6 +326,63 @@ export function parseAiReplyLines(reply: string, participants: readonly Rehearsa
 		}
 	}
 	return lines;
+}
+
+// ============================================================================
+// 对戏调度器（决定下一句由哪个 AI 角色开口）
+// ============================================================================
+
+/** 调度提示：根据最新记录决定下一个开口的在场 AI 角色。 */
+export function buildPlannerPrompt(input: {
+	sceneName: string;
+	sceneStart: string;
+	characters: Array<{ id: string; name: string }>;
+	transcript: string;
+	userRoleName: string | undefined;
+}): string {
+	const characterLines = input.characters.map((character) => `- ${character.id}：${character.name}`);
+	const userLabel = input.userRoleName ?? "旁白/导演";
+	return [
+		"你是对戏的轮次调度器，只负责决定下一句由谁开口，绝不自己扮演角色。",
+		`场景：${input.sceneName}${input.sceneStart ? `\n起始情境：${input.sceneStart}` : ""}`,
+		`用户扮演：${userLabel}（其最新消息在记录末尾）。`,
+		"在场 AI 角色（id：名字）：",
+		characterLines.join("\n"),
+		"规则：",
+		"- 若记录尾部有人点名某角色（如「知遥，别闹」），必须返回该角色 id。",
+		"- 否则返回「最应该接话」的角色 id：优先承接上一条消息/被提到的话题；避免同一角色连续开口（除非点名），让对话自然交替。",
+		"- 若话题已自然结束、没有角色需要接话（例如导演指示该收场），返回 null。",
+		"只输出一个 JSON 对象，不要输出其它内容：",
+		'{"speaker": "角色id" | null}',
+		"<本段对戏记录>",
+		input.transcript,
+		"</本段对戏记录>",
+	].join("\n");
+}
+
+/**
+ * 解析调度结果：返回要开口的角色 id；null = 调度器明确收场（无人接话）；
+ * undefined = 解析失败/说话人不在场（调用方可回退兜底）。
+ */
+export function parsePlannerResult(text: string, knownIds: readonly string[]): string | null | undefined {
+	const stripped = text
+		.replace(/```(?:json)?\s*/gi, "")
+		.replace(/```/g, "")
+		.trim();
+	const start = stripped.indexOf("{");
+	const end = stripped.lastIndexOf("}");
+	if (start === -1 || end <= start) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stripped.slice(start, end + 1));
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null) return undefined;
+	const speaker = (parsed as Record<string, unknown>).speaker;
+	if (speaker === null) return null;
+	if (typeof speaker !== "string") return undefined;
+	return knownIds.includes(speaker) ? speaker : undefined;
 }
 
 // ============================================================================
