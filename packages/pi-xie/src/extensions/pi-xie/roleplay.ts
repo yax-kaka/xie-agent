@@ -10,6 +10,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
 import { UNRESTRICTED_SYSTEM_PROMPT } from "../../core/system-prompt.ts";
 import { type EntityRecord, listChapters } from "./workspace.ts";
 
@@ -359,6 +360,53 @@ export function buildMentionCompletions(
 		}));
 }
 
+/**
+ * 对戏点名补全 provider：对戏进行中且输入为行首「@xxx」时列出在场 AI 角色；
+ * 其余输入（/ 命令、@ 文件引用、普通文本）原样委托给 pi 自带补全，
+ * 包括 applyCompletion——绝不能改写非点名补全的插入结果。
+ */
+export function buildRehearsalMentionProvider(
+	current: AutocompleteProvider,
+	getActiveRehearsal: () => Pick<RehearsalContext, "cwd" | "aiCharacters"> | undefined,
+	sessionCwd: string,
+): AutocompleteProvider {
+	const mentionPrefix = (lines: string[], cursorLine: number, cursorCol: number): string | undefined => {
+		const active = getActiveRehearsal();
+		if (!active || active.cwd !== sessionCwd) return undefined;
+		const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
+		const match = /^@([^\s]*)$/.exec(textBeforeCursor);
+		return match ? (match[1] ?? "") : undefined;
+	};
+	return {
+		triggerCharacters: ["@"],
+		async getSuggestions(lines, cursorLine, cursorCol, options) {
+			const typed = mentionPrefix(lines, cursorLine, cursorCol);
+			if (typed === undefined) return current.getSuggestions(lines, cursorLine, cursorCol, options);
+			const items: AutocompleteItem[] = buildMentionCompletions(getActiveRehearsal()?.aiCharacters ?? [], typed);
+			if (items.length === 0) return null;
+			return { items, prefix: `@${typed}` };
+		},
+		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+			// 非点名上下文（如 / 命令补全）必须委托，否则会把 /对戏 错改成 @对戏
+			if (mentionPrefix(lines, cursorLine, cursorCol) === undefined) {
+				return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+			}
+			const line = lines[cursorLine] ?? "";
+			const atIndex = line.lastIndexOf("@", cursorCol - 1);
+			const before = line.slice(0, atIndex);
+			const after = line.slice(cursorCol);
+			const replacement = `@${item.value} `;
+			const newLines = [...lines];
+			newLines[cursorLine] = `${before}${replacement}${after}`;
+			return { lines: newLines, cursorLine, cursorCol: before.length + replacement.length };
+		},
+		shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+			if (mentionPrefix(lines, cursorLine, cursorCol) !== undefined) return false;
+			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? false;
+		},
+	};
+}
+
 // ============================================================================
 // AI 自动选角
 // ============================================================================
@@ -455,9 +503,11 @@ export function parseCastResult(text: string, knownCharacters: CastCharacter[]):
 // 成文指令
 // ============================================================================
 
-/** 统计对戏记录中的台词行数（每行形如 [角色] 或 [user:角色] 开头）。 */
+/** 统计对戏记录中的台词行数（每行形如 [角色] 或 [user:角色] 开头；纯点名指令行「@角色」不计）。 */
 export function countTranscriptLines(transcript: string): number {
-	return transcript.split(/\r?\n/).filter((line) => /^\[(user:)?[^\]]+\]/.test(line)).length;
+	return transcript
+		.split(/\r?\n/)
+		.filter((line) => /^\[(user:)?[^\]]+\]/.test(line) && !/^\[(user:)?[^\]]+\]\s*@[^\s]+\s*$/.test(line)).length;
 }
 
 const FIDELITY_RULES = [

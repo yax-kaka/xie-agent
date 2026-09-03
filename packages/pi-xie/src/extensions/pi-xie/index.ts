@@ -1,11 +1,10 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { type AutocompleteItem, Text } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { isArmorBreakEnabled, setArmorBreakEnabled } from "../../core/armor-break.ts";
 import type {
 	AgentToolResult,
-	AutocompleteProviderFactory,
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionContext,
@@ -18,8 +17,8 @@ import {
 	applyDefaultUserRole,
 	buildCastPrompt,
 	buildChapterProseInstruction,
-	buildMentionCompletions,
 	buildProseInstruction,
+	buildRehearsalMentionProvider,
 	buildRoleplaySystemPrompt,
 	type CastResult,
 	classifySpeakTarget,
@@ -226,7 +225,8 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 
 	let rehearsal: RehearsalContext | undefined;
 	let lastRoundSummary: string | undefined;
-	let currentSessionCwd: string | undefined;
+	/** @角色 切换扮演时允许的特殊叙述身份（无需角色卡）。 */
+	const NARRATOR_ROLES = new Set(["旁白", "自己", "导演", "narrator", "director"]);
 	const rehearsalActive = (): boolean => rehearsal !== undefined;
 	const clearRehearsalUi = (ctx: ExtensionContext) => {
 		lastRoundSummary = undefined;
@@ -374,9 +374,23 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		const current = rehearsal;
 		if (!current || current.cwd !== ctx.cwd) return;
 		const speak = parseSpeakAs(raw);
-		const target = speak.roleName ? classifySpeakTarget(speak.roleName, current.aiCharacters) : undefined;
-		if (target?.kind === "user") current.userRoleName = target.roleName || undefined;
-		const text = speak.text.trim();
+		let target = speak.roleName ? classifySpeakTarget(speak.roleName, current.aiCharacters) : undefined;
+		let text = speak.text.trim();
+		if (target?.kind === "user") {
+			const roleName = target.roleName;
+			const known =
+				NARRATOR_ROLES.has(roleName) ||
+				listEntities(ctx.cwd, "characters").some(
+					(candidate) => candidate.id === roleName || candidate.name === roleName,
+				);
+			if (known) {
+				current.userRoleName = roleName;
+			} else {
+				// 未知角色名（如没打空格的「@千夏你来了」）：不切换角色，整行按原文记为台词
+				target = undefined;
+				text = raw.trim();
+			}
+		}
 
 		const isDirector = current.userRoleName === undefined;
 		const names = current.aiCharacters.map((participant) => participant.name).join("、");
@@ -456,44 +470,6 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 			);
 		}
 	};
-	/**
-	 * @点名补全：对戏进行中且输入为行首「@xxx」时列出在场 AI 角色；
-	 * 其余输入（含退出对戏后的 @ 文件引用）原样交给 pi 自带补全。
-	 */
-	const buildRehearsalMentionProvider: AutocompleteProviderFactory = (current) => {
-		const sessionCwd = currentSessionCwd;
-		const mentionPrefix = (lines: string[], cursorLine: number, cursorCol: number): string | undefined => {
-			const active = rehearsal;
-			if (!active || active.cwd !== sessionCwd) return undefined;
-			const textBeforeCursor = (lines[cursorLine] ?? "").slice(0, cursorCol);
-			const match = /^@([^\s]*)$/.exec(textBeforeCursor);
-			return match ? (match[1] ?? "") : undefined;
-		};
-		return {
-			triggerCharacters: ["@"],
-			async getSuggestions(lines, cursorLine, cursorCol, options) {
-				const typed = mentionPrefix(lines, cursorLine, cursorCol);
-				if (typed === undefined) return current.getSuggestions(lines, cursorLine, cursorCol, options);
-				const items: AutocompleteItem[] = buildMentionCompletions(rehearsal?.aiCharacters ?? [], typed);
-				if (items.length === 0) return null;
-				return { items, prefix: `@${typed}` };
-			},
-			applyCompletion(lines, cursorLine, cursorCol, item) {
-				const line = lines[cursorLine] ?? "";
-				const atIndex = line.lastIndexOf("@", cursorCol - 1);
-				const before = line.slice(0, atIndex);
-				const after = line.slice(cursorCol);
-				const replacement = `@${item.value} `;
-				const newLines = [...lines];
-				newLines[cursorLine] = `${before}${replacement}${after}`;
-				return { lines: newLines, cursorLine, cursorCol: before.length + replacement.length };
-			},
-			shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
-				if (mentionPrefix(lines, cursorLine, cursorCol) !== undefined) return false;
-				return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? false;
-			},
-		};
-	};
 	pi.on("session_start", (_event, ctx) => {
 		systemPromptShown = false;
 		noAiChapter = undefined;
@@ -502,8 +478,7 @@ export default function piXieExtension(pi: ExtensionAPI): void {
 		clearRehearsalUi(ctx);
 		// 对戏 @点名 补全：仅交互模式；会话切换时 interactive mode 会清空 provider 包装并重新挂载
 		if (ctx.mode === "tui") {
-			currentSessionCwd = ctx.cwd;
-			ctx.ui.addAutocompleteProvider(buildRehearsalMentionProvider);
+			ctx.ui.addAutocompleteProvider((current) => buildRehearsalMentionProvider(current, () => rehearsal, ctx.cwd));
 		}
 	});
 	pi.on("before_agent_start", async (event, ctx) => {

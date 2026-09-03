@@ -1,7 +1,8 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import type { AutocompleteItem, AutocompleteProvider } from "@earendil-works/pi-tui";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
 	appendRoleLine,
 	applyDefaultUserRole,
@@ -9,6 +10,7 @@ import {
 	buildChapterProseInstruction,
 	buildMentionCompletions,
 	buildProseInstruction,
+	buildRehearsalMentionProvider,
 	buildRoleplaySystemPrompt,
 	classifySpeakTarget,
 	countTranscriptLines,
@@ -365,6 +367,72 @@ describe("buildMentionCompletions", () => {
 	});
 });
 
+describe("buildRehearsalMentionProvider", () => {
+	// cwd 在 beforeEach 里赋值，必须在测试执行时取值，不能用模块级常量捕获
+	const active = () => ({ cwd, aiCharacters: [{ id: "qianxia", name: "千夏" }] });
+	const signal = () => new AbortController().signal;
+	const makeStub = () => {
+		const apply = vi.fn(
+			(
+				lines: string[],
+				_cursorLine: number,
+				_cursorCol: number,
+				_item: AutocompleteItem,
+				_prefix: string,
+			): { lines: string[]; cursorLine: number; cursorCol: number } => ({ lines, cursorLine: 0, cursorCol: 0 }),
+		);
+		const stub: AutocompleteProvider = {
+			async getSuggestions() {
+				return { items: [{ value: "对戏", label: "对戏" }], prefix: "/" };
+			},
+			applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+				return apply(lines, cursorLine, cursorCol, item, prefix);
+			},
+		};
+		return { stub, apply };
+	};
+
+	test("delegates slash-command suggestions and completions to the built-in provider", async () => {
+		const { stub, apply } = makeStub();
+		const provider = buildRehearsalMentionProvider(stub, active, cwd);
+		const suggestions = await provider.getSuggestions(["/"], 0, 1, { signal: signal() });
+		expect(suggestions?.prefix).toBe("/");
+		// 回归：/ 命令补全必须委托原 provider，绝不能把 /对戏 改写成 @对戏
+		const lines = ["/"];
+		const result = provider.applyCompletion(lines, 0, 1, { value: "对戏", label: "对戏" }, "/");
+		expect(apply).toHaveBeenCalledTimes(1);
+		expect(result.lines[0]).toBe("/");
+		expect(result.lines[0]).not.toContain("@");
+	});
+
+	test("offers mention completions for @-prefixed input while rehearsing", async () => {
+		const { stub } = makeStub();
+		const provider = buildRehearsalMentionProvider(stub, active, cwd);
+		const suggestions = await provider.getSuggestions(["@千"], 0, 2, { signal: signal() });
+		expect(suggestions?.prefix).toBe("@千");
+		expect(suggestions?.items.map((item) => item.value)).toEqual(["千夏"]);
+	});
+
+	test("applies a mention completion by replacing the @prefix with the name", () => {
+		const { stub } = makeStub();
+		const provider = buildRehearsalMentionProvider(stub, active, cwd);
+		const lines = ["@千"];
+		const result = provider.applyCompletion(lines, 0, 2, { value: "千夏", label: "千夏" }, "@千");
+		expect(result.lines[0]).toBe("@千夏 ");
+		expect(result.cursorCol).toBe(4);
+		expect(lines).toEqual(["@千"]); // 不修改调用方数组
+	});
+
+	test("delegates everything when no rehearsal is active", async () => {
+		const { stub, apply } = makeStub();
+		const provider = buildRehearsalMentionProvider(stub, () => undefined, cwd);
+		expect((await provider.getSuggestions(["@千"], 0, 2, { signal: signal() }))?.prefix).toBe("/");
+		const result = provider.applyCompletion(["@千"], 0, 2, { value: "x", label: "x" }, "@千");
+		expect(apply).toHaveBeenCalledTimes(1);
+		expect(result.lines).toEqual(["@千"]); // 原样返回 stub 的结果，不改写
+	});
+});
+
 describe("deriveSceneStartSuggestion", () => {
 	test("returns the last paragraph of the latest chapter", () => {
 		writeChapter(cwd, "第一段内容。\n\n第二段：两人爬山。");
@@ -381,6 +449,11 @@ describe("countTranscriptLines and conversion instructions", () => {
 	test("counts role lines including user-prefixed ones", () => {
 		expect(countTranscriptLines("[user:男主] 到了。\n[绯雪] （抬头）嗯。\n")).toBe(2);
 		expect(countTranscriptLines("# 起始：两人在山上\n\n正文段")).toBe(0);
+	});
+
+	test("excludes instruction-only @mention lines from the line count", () => {
+		expect(countTranscriptLines("[user:策栖辞] @千夏\n[绯雪] 嗯。")).toBe(1);
+		expect(countTranscriptLines("[user:策栖辞] @千夏 端粥进来")).toBe(1); // 带台词的仍是台词
 	});
 
 	test("buildChapterProseInstruction demands line-by-line fidelity with a self-check count", () => {

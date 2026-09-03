@@ -229,6 +229,25 @@ describe("pi-xie /对戏 command", () => {
 		expect(record).not.toContain("@知遥");
 	});
 
+	test("an unknown @-prefixed name is kept as plain dialogue instead of switching roles", async () => {
+		const { commands, inputHandler, runtime } = await loadExtension();
+		runtime.appendEntry = vi.fn();
+		const runSubAgent = vi.fn<(options: RoleplayRunOptions) => Promise<string | undefined>>();
+		runSubAgent.mockResolvedValueOnce(JSON.stringify({ aiRoles: ["绯雪"], userRole: "策栖辞" })); // 选角
+		runSubAgent.mockResolvedValueOnce("绯雪：……嗯。");
+		runtime.runSubAgent = runSubAgent;
+		const { context, select, editor } = createCommandContext();
+		await enterWithAutoCast(select, editor, runSubAgent, { aiRoles: ["绯雪"], userRole: "策栖辞" });
+		await commands.get("对戏")?.handler("", context);
+
+		// 「@千夏你昨晚没睡好？」没打空格：不能把整串吞成角色名，也不能丢台词
+		await inputHandler(input("@千夏你昨晚没睡好？"), context);
+
+		const record = readFileSync(recordPathFor(cwd, "早饭餐桌", ["绯雪"]), "utf8");
+		expect(record).toContain("[user:策栖辞] @千夏你昨晚没睡好？");
+		expect(record).toContain("[绯雪] ……嗯。");
+	});
+
 	test("casts to a single AI role keep the legacy file name", async () => {
 		const { commands, inputHandler, runtime } = await loadExtension();
 		runtime.appendEntry = vi.fn();
