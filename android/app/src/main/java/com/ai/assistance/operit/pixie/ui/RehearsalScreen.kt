@@ -139,7 +139,6 @@ private fun rehearsalViewModel(): RehearsalViewModel {
 private fun SetupSheet(viewModel: RehearsalViewModel) {
     var showCreateScene by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
-    var unrestricted by remember { mutableStateOf(true) }
     // 按当前场景 + 选中角色实时判断是否已有记录（显示「续写对戏」）
     val recordExists by produceState(
         initialValue = false,
@@ -228,7 +227,10 @@ private fun SetupSheet(viewModel: RehearsalViewModel) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("破甲（不受限创作，提示词置顶）", style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.weight(1f))
-            Switch(checked = unrestricted, onCheckedChange = { unrestricted = it })
+            Switch(
+                checked = viewModel.setupUnrestricted,
+                onCheckedChange = { viewModel.setupUnrestricted = it },
+            )
         }
 
         if (viewModel.notice.isNotEmpty()) {
@@ -239,17 +241,25 @@ private fun SetupSheet(viewModel: RehearsalViewModel) {
             )
         }
         Spacer(Modifier.height(16.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Button(
-                onClick = { viewModel.start(unrestricted = unrestricted, startNew = true) },
+                onClick = { viewModel.start(unrestricted = viewModel.setupUnrestricted, startNew = true) },
                 enabled = viewModel.sceneId.isNotEmpty() && viewModel.selectedCharacterIds.isNotEmpty(),
             ) {
                 Text("开始对戏")
             }
             if (recordExists) {
-                OutlinedButton(onClick = { viewModel.start(unrestricted = unrestricted, startNew = false) }) {
+                OutlinedButton(onClick = {
+                    viewModel.start(unrestricted = viewModel.setupUnrestricted, startNew = false)
+                }) {
                     Text("续写对戏")
                 }
+            }
+            OutlinedButton(
+                onClick = { viewModel.castScene() },
+                enabled = viewModel.sceneId.isNotEmpty() && viewModel.characters.isNotEmpty() && !viewModel.casting,
+            ) {
+                Text(if (viewModel.casting) "选角中…" else "AI 选角")
             }
         }
     }
@@ -428,17 +438,18 @@ private fun ActivePanel(viewModel: RehearsalViewModel, onGoBack: () -> Unit) {
     }
 
     Column(Modifier.fillMaxSize()) {
-        // 顶栏
+        // 顶栏（标题行 + 可横滑的操作行，窄屏不裁剪）
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 "对戏 · ${viewModel.sceneName}",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f, fill = false),
             )
             Spacer(Modifier.width(8.dp))
             Text(
@@ -454,10 +465,24 @@ private fun ActivePanel(viewModel: RehearsalViewModel, onGoBack: () -> Unit) {
                     Text("停止")
                 }
             }
+            TextButton(onClick = { showExitDialog = true }) { Text("退出") }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             TextButton(onClick = { showProseDialog = true }) { Text("成文") }
+            TextButton(onClick = { viewModel.toggleAutoProse() }) {
+                Text(if (viewModel.autoProse) "自动:开" else "自动:关")
+            }
+            TextButton(onClick = { viewModel.toggleTts() }) {
+                Text(if (viewModel.ttsEnabled) "朗读:开" else "朗读:关")
+            }
             TextButton(onClick = { showMonitor = true }) { Text("监视") }
             TextButton(onClick = { showOrderDialog = true }) { Text("顺序") }
-            TextButton(onClick = { showExitDialog = true }) { Text("退出") }
         }
 
         // 摘要与提示
@@ -644,9 +669,27 @@ private fun ActivePanel(viewModel: RehearsalViewModel, onGoBack: () -> Unit) {
             },
             onNewSegment = {
                 showExitDialog = false
-                viewModel.start(unrestricted = true, startNew = true)
+                viewModel.restartNewSegment()
             },
             onDismiss = { showExitDialog = false },
+        )
+    }
+    viewModel.pendingToolConfirm?.let { confirm ->
+        AlertDialog(
+            onDismissRequest = { viewModel.answerToolConfirm(false) },
+            title = { Text("运行工具 ${confirm.name}？") },
+            text = {
+                Text(
+                    confirm.summary.ifBlank { "（无参数）" },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.answerToolConfirm(true) }) { Text("允许") }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.answerToolConfirm(false) }) { Text("拒绝") }
+            },
         )
     }
 }
@@ -727,13 +770,11 @@ private fun RoleplayLineBubble(
     onCopy: () -> Unit,
 ) {
     // Operit 头像+气泡风格：AI 行按 roleName 查角色卡头像；
-    // 气泡已显示角色名时不再重复行首标签（主题关闭角色名时才补上）
+    // 长按触发区在行首标签（或气泡顶部窄条），避免与气泡内文本选择冲突
     val themeSnapshot = LocalThemePreferenceSnapshot.current
     Box {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .combinedClickable(onClick = {}, onLongClick = onLongPress),
+            modifier = Modifier.fillMaxWidth(),
         ) {
             if (ui.line.user || !themeSnapshot.showRoleName) {
                 Text(
@@ -747,6 +788,7 @@ private fun RoleplayLineBubble(
                     },
                     modifier = Modifier
                         .fillMaxWidth()
+                        .combinedClickable(onClick = {}, onLongClick = onLongPress)
                         .padding(
                             start = if (ui.line.user) 0.dp else 16.dp,
                             end = if (ui.line.user) 16.dp else 0.dp,
@@ -755,6 +797,14 @@ private fun RoleplayLineBubble(
                     textAlign = if (ui.line.user) androidx.compose.ui.text.style.TextAlign.End else androidx.compose.ui.text.style.TextAlign.Start,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                )
+            } else {
+                // 气泡自己显示角色名：用顶部窄条承接长按
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(10.dp)
+                        .combinedClickable(onClick = {}, onLongClick = onLongPress),
                 )
             }
             BubbleStyleChatMessage(
@@ -955,7 +1005,10 @@ private fun ProseDialog(
     val chapters by produceState(initialValue = emptyList<ChapterInfo>()) {
         value = withContext(Dispatchers.IO) { viewModel.chapters().reversed() }
     }
-    var chapterFile by remember { mutableStateOf(chapters.firstOrNull()?.file) }
+    var chapterFile by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(chapters) {
+        if (chapterFile == null) chapterFile = chapters.firstOrNull()?.file
+    }
     var continuation by remember { mutableStateOf("") }
     var started by remember { mutableStateOf(false) }
     AlertDialog(

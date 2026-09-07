@@ -47,6 +47,13 @@ data class ActivePremises(
     val scenes: List<String>,
 )
 
+/** 撤销快照：与电脑 pi-xie 的 .pi-xie/undo/last.json 格式一致（互拷兼容）。 */
+data class UndoSnapshot(
+    val action: String,
+    val path: String,
+    val oldContent: String?,
+)
+
 data class ChapterInfo(
     val number: Int,
     val file: String,
@@ -69,6 +76,69 @@ class WorkspaceStore(private val cwd: File) {
     private val chaptersDir: File get() = File(cwd, "chapters")
     private val activePath: File get() = File(workspaceDir, "active.json")
     private val manuscriptFile: File get() = File(cwd, "manuscript.txt")
+
+    /** 工作区根目录（工具层读上下文用）。 */
+    fun cwdFile(): File = cwd
+
+    /** 外部写路径（如排练稿工具）接入撤销快照。 */
+    fun snapshotUndo(action: String, path: File, oldContent: String?) {
+        recordUndo(action, path, oldContent)
+    }
+
+    // ===== 撤销快照（.pi-xie/undo/last.json，与电脑 pi-xie 格式一致） =====
+
+    private val undoPath: File get() = File(cwd, ".pi-xie/undo/last.json")
+
+    private fun recordUndo(action: String, path: File, oldContent: String?) {
+        undoPath.parentFile?.mkdirs()
+        val relative = cwd.canonicalFile.toPath()
+            .relativize(path.canonicalFile.toPath())
+            .toString()
+            .replace('\\', '/')
+        undoPath.writeText(
+            prettyJson(
+                mapOf(
+                    "toolCallId" to "",
+                    "action" to action,
+                    "path" to relative,
+                    "oldContent" to (oldContent ?: ""),
+                ),
+            ),
+        )
+    }
+
+    fun hasUndo(): Boolean = undoPath.exists()
+
+    /** 撤销最近一次写操作并清空快照；返回被撤销的快照（无可撤销返回 null）。 */
+    fun undoLast(): UndoSnapshot? {
+        if (!undoPath.exists()) return null
+        val parsed = try {
+            readJsonObject(undoPath.readText())
+        } catch (e: Exception) {
+            undoPath.delete()
+            return null
+        }
+        val action = parsed["action"] as? String ?: return null
+        val relative = parsed["path"] as? String ?: return null
+        val oldContent = (parsed["oldContent"] as? String)?.ifEmpty { null }
+        val target = File(cwd, relative)
+        try {
+            if (oldContent == null) {
+                target.delete() // 撤销「新建」：删除刚创建的文件
+            } else {
+                target.parentFile?.mkdirs()
+                target.writeText(oldContent) // 撤销「修改/删除」：恢复旧内容
+            }
+        } catch (e: Exception) {
+            return null
+        }
+        // 章节文件被撤销后，manuscript.txt 需要按章节目录重建保持一致
+        if (target.canonicalFile.toPath().startsWith(chaptersDir.canonicalFile.toPath())) {
+            rebuildManuscript()
+        }
+        undoPath.delete()
+        return UndoSnapshot(action = action, path = relative, oldContent = oldContent)
+    }
 
     fun ensureWorkspace() {
         workspaceDir.mkdirs()
@@ -152,6 +222,7 @@ class WorkspaceStore(private val cwd: File) {
             body = body,
             path = File(dir, "$resolvedId.md"),
         )
+        recordUndo("create", record.path, null)
         record.path.writeText(encodeFrontmatter(record))
         return record
     }
@@ -177,6 +248,7 @@ class WorkspaceStore(private val cwd: File) {
             body = body ?: existing.body,
             path = existing.path,
         )
+        recordUndo("update", next.path, existing.path.readText())
         next.path.writeText(encodeFrontmatter(next))
         return next
     }
@@ -184,6 +256,7 @@ class WorkspaceStore(private val cwd: File) {
     fun deleteEntity(kind: EntityKind, id: String): File {
         val path = entityPath(kind, id)
         if (!path.exists()) throw IllegalArgumentException("Unknown ${kind.dirName.removeSuffix("s")}: $id")
+        recordUndo("delete", path, path.readText())
         path.delete()
         return path
     }
@@ -215,6 +288,8 @@ class WorkspaceStore(private val cwd: File) {
     fun writeConstraint(name: String, content: String): File {
         ensureWorkspace()
         val path = File(workspaceDir, "$name.md")
+        val old = if (path.exists()) path.readText() else null
+        recordUndo(if (old == null) "create" else "update", path, old)
         path.writeText(content.trimEnd() + "\n")
         return path
     }
@@ -237,6 +312,7 @@ class WorkspaceStore(private val cwd: File) {
         ensureWorkspace()
         val path = chapterFile(chapter, next = chapter == null)
         if (path.exists()) throw IllegalArgumentException("Chapter already exists: ${path.absolutePath}")
+        recordUndo("create", path, null)
         path.writeText(content.trimEnd() + "\n")
         val number = Regex("(\\d+)\\.md$").find(path.absolutePath)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         val record = ChapterInfo(number, path.name, path, content)
@@ -248,6 +324,7 @@ class WorkspaceStore(private val cwd: File) {
         ensureWorkspace()
         val path = chapterFile(chapter, next = false)
         if (!path.exists()) throw IllegalArgumentException("Chapter not found: ${path.absolutePath}")
+        recordUndo("update", path, path.readText())
         path.writeText(content.trimEnd() + "\n")
         val number = Regex("(\\d+)\\.md$").find(path.absolutePath)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         val record = ChapterInfo(number, path.name, path, content)
