@@ -8,8 +8,10 @@
 - [x] `feat/android-port` 分支；Operit 骨架导入 `android/`（docs/examples/原生模块等已剔除）
 - [x] settings 裁剪为仅 `:app`；app/build.gradle.kts 移除 8 个模块依赖与 ffmpeg AAR
 - [x] 移除 STT 模型下载任务与外部原生库校验任务（syncSttModelAssets / verifyExternallyBuiltNativeLibraries）
-- [ ] 裁剪编译闭环：删除依赖已删模块的功能代码，`compileDebugKotlin` 通过
-- [ ] `assembleDebug` 出 APK + 模拟器跑通基础聊天 → 提交基线
+- [x] 裁剪编译闭环：删除依赖已删模块的功能代码（本地模型/3D 角色/shower 自动化/终端/FFmpeg/JS 工具包生态，约 150 文件），`compileDebugKotlin` 通过
+- [x] CMake 只保留聊天流式渲染 streamnative 库（去掉 sherpa-ncnn/WAMR）；abiFilters 加 x86_64 供模拟器调试
+- [x] `assembleDebug` 出 APK（123.9MB，后续瘦身）+ 真机（魅族 Note 16 Pro）安装启动无崩溃 → 基线提交 `6b6ddfe`
+- [ ] 瘦身：清理 assets 里 OS 自动化残留（desktop.apk/accessibility.apk/shizuku.apk/templates）与 filament 等大依赖
 
 ## Phase 0 构建基线
 
