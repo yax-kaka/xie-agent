@@ -19,6 +19,13 @@
 - [x] 角色 → 导出到 Operit 角色卡；角色图片上传 → 写作 agent 视觉分析更新外貌（保留其它设定，回归单测）
 - [x] 对戏成文：按电脑 pi-xie /对戏成文 逻辑（选章节最新在前 + 可选续写位置 → 保真规则改写 → 保存落盘）；退出菜单三选项（退出/退出并成文/新开一段）
 - [x] 气泡默认头像改为灰色圆（无头像图片时不用默认图标）；导入/导出文字按钮（↓导入 ↑导出）
+- [x] 写作 agent 工具回路按 PC 全集移植（17 工具：list/get/create/update/delete_entity、select_premises、get_active_context、set_*×4、get_style、read/write/rewrite_chapter、write_rehearsal_prose、undo_last；kind=character/scene、tags/opening/system 全字段）
+- [x] 工具确认机制 + 自动写入开关（.pi-xie/permissions.json）；真机验证：对话「删除 Feixue」→ 工具真实删除 → 撤销恢复
+- [x] 统一设置弹窗（自动写入/默认扮演(.pi-xie/user-role.json)/前提选择(active.json)/manuscript 重建/酒馆角色导入 Tavern JSON）
+- [x] 主写作 agent 提示词按 PC core/system-prompt.ts 对齐（写作规则/角色扮演交接/约束硬规则逐条对应）
+- [x] 写作输入栏移除语音按钮
+- [x] 对戏朗读：复用 Operit VoiceService（活跃语音档案），AI 台词落盘自动朗读；顶栏「朗读」开关。真机注意：Flyme 无系统 TTS 引擎（SIMPLE_TTS 初始化失败 -1），需在「语音服务设置」选 VITS 本地少女模型（onnxruntime 依赖保留）或 HTTP 女声
+- [x] 对戏/写作顶栏改两行布局（标题行 + 可横滑操作行），修复按钮溢出
 - [ ] 瘦身：清理 assets 里 OS 自动化残留（desktop.apk/accessibility.apk/shizuku.apk/templates）与 filament 等大依赖
 
 ## Phase 0 构建基线
