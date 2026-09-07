@@ -13,6 +13,7 @@
 - [x] `assembleDebug` 出 APK（123.9MB，后续瘦身）+ 真机（魅族 Note 16 Pro）安装启动无崩溃 → 基线提交 `6b6ddfe`
 - [x] Phase 1 Step 1：工作区/记录/解析/提示词 Kotlin 移植（pixie.workspace + RehearsalRecord + RoleplayParsing + PixiePrompts，含 golden 单测 25 例全绿）；清理 6 个依赖未移植模块的孤儿测试文件
 - [x] Phase 1 Step 2：对戏引擎 RehearsalEngine（常驻转录/自判发言/轮内串行/点名/重说/改台词/发言顺序持久化，golden 单测 9 例全绿）+ AIServiceTurnRunner 流式接入（禁重试，abort 干净）
+- [x] Phase 1 Step 3：对戏屏 RehearsalScreen（侧边栏入口；可点命令：点名条/重说/改台词/发言顺序/监视；长按台词菜单；直播条；监视面板左右滑动）+ 快捷新建角色/场景；真机验收待跑
 - [ ] 瘦身：清理 assets 里 OS 自动化残留（desktop.apk/accessibility.apk/shizuku.apk/templates）与 filament 等大依赖
 
 ## Phase 0 构建基线
@@ -25,7 +26,7 @@
 
 - [x] 工作区：premises 文件格式（角色/场景/世界观/大纲/时间线/风格/active.json）+ 章节文件 + 对戏记录格式（# 起始：/# 顺序：/角色行/散文），与 pi-xie 一致
 - [ ] 对戏核心：常驻角色 agent（独立转录、他人台词引述格式）、轮内串行、发言顺序、点名、重说、改台词、沉默判定、标签去重/他人标签丢弃（引擎 RehearsalEngine + AIServiceTurnRunner 已随 Step 2 完成并测绿；与 UI 的接线待 Step 3）
-- [ ] 对戏 UI：聊天流（角色行/[子代理]/续写历史）、可点击命令面板与工具栏、点名条、直播条、监视面板（滑动切换）、台词长按菜单
+- [ ] 对戏 UI：聊天流（角色行/[子代理]/续写历史）、可点击命令面板与工具栏、点名条、直播条、监视面板（滑动切换）、台词长按菜单（已随 Step 3 完成；与引擎联调的真机验收待跑）
 - [ ] 成文（保真规则）写入章节；自动成文开关
 - [ ] 破甲优先：写作/角色 agent 自建系统提示词（不含 Operit 默认提示词），破甲块置顶，设置页可点开关
 

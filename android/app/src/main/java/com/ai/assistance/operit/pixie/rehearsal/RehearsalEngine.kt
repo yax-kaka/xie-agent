@@ -316,6 +316,11 @@ class RehearsalEngine(
                     onActivityUpdate?.invoke(characterSession)
                 },
             )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // 中断（停止按钮/退出）：必须继续抛出，不能当成回合失败吞掉
+            activity.status = "idle"
+            onActivityUpdate?.invoke(characterSession)
+            throw e
         } catch (e: Exception) {
             // 单角色回合失败不炸掉整轮：视为未回应，由调用方决定汇总
             reply = ""

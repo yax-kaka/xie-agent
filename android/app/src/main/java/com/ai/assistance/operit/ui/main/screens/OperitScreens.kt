@@ -53,6 +53,7 @@ import com.ai.assistance.operit.ui.features.update.screens.UpdateScreen
 import com.ai.assistance.operit.ui.features.workflow.screens.WorkflowListScreen
 import com.ai.assistance.operit.ui.features.workflow.screens.WorkflowDetailScreen
 import com.ai.assistance.operit.ui.main.navigation.AppRouterGateway
+import com.ai.assistance.operit.pixie.ui.RehearsalScreen
 
 // 路由配置类
 typealias ScreenNavigationHandler = (Screen) -> Unit
@@ -127,6 +128,25 @@ sealed class Screen(
                     onError = onError,
                     onGestureConsumed = onGestureConsumed
             )
+        }
+    }
+
+    data object Rehearsal :
+            Screen(
+                    titleRes = R.string.screen_title_rehearsal,
+                    usesRouteViewModelStore = true,
+            ) {
+        @Composable
+        override fun Content(
+                navController: NavController,
+                navigateTo: ScreenNavigationHandler,
+                onGoBack: () -> Unit,
+                hasBackgroundImage: Boolean,
+                onLoading: (Boolean) -> Unit,
+                onError: (String) -> Unit,
+                onGestureConsumed: (Boolean) -> Unit
+        ) {
+            RehearsalScreen(onGoBack = onGoBack)
         }
     }
 
