@@ -5,6 +5,7 @@ import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.automirrored.filled.Help
@@ -23,6 +24,8 @@ import com.ai.assistance.operit.R
 // 应用导航项
 sealed class NavItem(val route: String, val titleResId: Int, val icon: ImageVector) {
         object AiChat : NavItem("ai_chat", R.string.nav_ai_chat, Icons.Default.Email)
+        object Writing :
+                NavItem("writing", R.string.screen_title_writing, Icons.Default.EditNote)
         object Rehearsal :
                 NavItem("rehearsal", R.string.screen_title_rehearsal, Icons.Default.TheaterComedy)
         object ShizukuCommands :

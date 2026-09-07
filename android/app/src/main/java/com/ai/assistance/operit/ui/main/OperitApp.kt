@@ -335,7 +335,7 @@ fun OperitApp(
 
     val navItems = listOf(
         NavItem.AiChat,
-        NavItem.Rehearsal,
+        NavItem.Writing,
         NavItem.AssistantConfig,
         NavItem.MemoryBase,
         NavItem.Toolbox,

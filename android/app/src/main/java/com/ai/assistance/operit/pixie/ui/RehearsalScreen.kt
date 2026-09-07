@@ -15,9 +15,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -60,14 +62,18 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.toMutableStateList
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -79,10 +85,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.platform.LocalContext
+import android.app.Application
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import android.app.Application
+import com.ai.assistance.operit.data.model.ChatMessage
+import com.ai.assistance.operit.pixie.workspace.ChapterInfo
+import com.ai.assistance.operit.ui.features.chat.components.style.bubble.BubbleStyleChatMessage
+import com.ai.assistance.operit.ui.theme.LocalThemePreferenceSnapshot
+import com.ai.assistance.operit.ui.theme.rememberActiveThemePreferenceSnapshot
 import kotlinx.coroutines.launch
 
 /**
@@ -129,6 +140,16 @@ private fun SetupSheet(viewModel: RehearsalViewModel) {
     var showCreateScene by remember { mutableStateOf(false) }
     var showCreateCharacter by remember { mutableStateOf(false) }
     var unrestricted by remember { mutableStateOf(true) }
+    // 按当前场景 + 选中角色实时判断是否已有记录（显示「续写对戏」）
+    val recordExists by produceState(
+        initialValue = false,
+        viewModel.sceneId,
+        viewModel.selectedCharacterIds,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            viewModel.recordExistsFor(viewModel.sceneId, viewModel.selectedCharacterIds)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -225,7 +246,7 @@ private fun SetupSheet(viewModel: RehearsalViewModel) {
             ) {
                 Text("开始对戏")
             }
-            if (viewModel.hasRecord) {
+            if (recordExists) {
                 OutlinedButton(onClick = { viewModel.start(unrestricted = unrestricted, startNew = false) }) {
                     Text("续写对戏")
                 }
@@ -387,6 +408,8 @@ private fun CreateCharacterDialog(onDismiss: () -> Unit, onCreate: (String, Stri
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ActivePanel(viewModel: RehearsalViewModel, onGoBack: () -> Unit) {
+    // Operit 气泡组件依赖主题快照
+    val themeSnapshot = rememberActiveThemePreferenceSnapshot()
     var input by remember { mutableStateOf("") }
     var menuForLine by remember { mutableStateOf<Int?>(null) }
     var confirmRetell by remember { mutableStateOf<Int?>(null) }
@@ -394,6 +417,9 @@ private fun ActivePanel(viewModel: RehearsalViewModel, onGoBack: () -> Unit) {
     var showEditDialog by remember { mutableStateOf(false) }
     var showOrderDialog by remember { mutableStateOf(false) }
     var showMonitor by remember { mutableStateOf(false) }
+    var showProseDialog by remember { mutableStateOf(false) }
+    var proseExitAfterSave by remember { mutableStateOf(false) }
+    var showExitDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
 
@@ -428,16 +454,10 @@ private fun ActivePanel(viewModel: RehearsalViewModel, onGoBack: () -> Unit) {
                     Text("停止")
                 }
             }
-            IconButton(onClick = { showMonitor = true }) {
-                Icon(Icons.Default.Visibility, contentDescription = "监视")
-            }
-            IconButton(onClick = { showOrderDialog = true }) {
-                Icon(Icons.Default.SwapVert, contentDescription = "发言顺序")
-            }
-            TextButton(onClick = {
-                viewModel.exit()
-                onGoBack()
-            }) { Text("退出") }
+            TextButton(onClick = { showProseDialog = true }) { Text("成文") }
+            TextButton(onClick = { showMonitor = true }) { Text("监视") }
+            TextButton(onClick = { showOrderDialog = true }) { Text("顺序") }
+            TextButton(onClick = { showExitDialog = true }) { Text("退出") }
         }
 
         // 摘要与提示
@@ -469,26 +489,28 @@ private fun ActivePanel(viewModel: RehearsalViewModel, onGoBack: () -> Unit) {
                 .fillMaxWidth(),
         ) {
             itemsIndexed(viewModel.lines, key = { _, ui -> ui.number }) { _, ui ->
-                LineRow(
-                    ui = ui,
-                    menuExpanded = menuForLine == ui.number,
-                    onDismissMenu = { menuForLine = null },
-                    onLongPress = { menuForLine = ui.number },
-                    onRetell = {
-                        menuForLine = null
-                        confirmRetell = ui.number
-                    },
-                    onEdit = {
-                        menuForLine = null
-                        showEditDialog = true
-                    },
-                    onCopy = {
-                        menuForLine = null
-                        clipboard.setText(
-                            AnnotatedString("${com.ai.assistance.operit.pixie.workspace.RehearsalRecord.formatRoleLine(ui.line)}"),
-                        )
-                    },
-                )
+                CompositionLocalProvider(LocalThemePreferenceSnapshot provides themeSnapshot) {
+                    RoleplayLineBubble(
+                        ui = ui,
+                        menuExpanded = menuForLine == ui.number,
+                        onDismissMenu = { menuForLine = null },
+                        onLongPress = { menuForLine = ui.number },
+                        onRetell = {
+                            menuForLine = null
+                            confirmRetell = ui.number
+                        },
+                        onEdit = {
+                            menuForLine = null
+                            showEditDialog = true
+                        },
+                        onCopy = {
+                            menuForLine = null
+                            clipboard.setText(
+                                AnnotatedString("${com.ai.assistance.operit.pixie.workspace.RehearsalRecord.formatRoleLine(ui.line)}"),
+                            )
+                        },
+                    )
+                }
             }
         }
 
@@ -510,7 +532,14 @@ private fun ActivePanel(viewModel: RehearsalViewModel, onGoBack: () -> Unit) {
                             "$input @${participant.name} "
                         }
                     },
-                    label = { Text("@${participant.name}") },
+                    label = {
+                        Text(
+                            "@${participant.name}",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 140.dp),
+                        )
+                    },
                 )
             }
             OutlinedButton(onClick = { showRetellDialog = true }) {
@@ -585,62 +614,110 @@ private fun ActivePanel(viewModel: RehearsalViewModel, onGoBack: () -> Unit) {
     if (showMonitor) {
         MonitorOverlay(viewModel) { showMonitor = false }
     }
+    if (showProseDialog) {
+        ProseDialog(
+            viewModel = viewModel,
+            onSaved = {
+                if (proseExitAfterSave) {
+                    viewModel.exit()
+                    onGoBack()
+                }
+            },
+            onDismiss = {
+                showProseDialog = false
+                proseExitAfterSave = false
+            },
+        )
+    }
+    if (showExitDialog) {
+        ExitRehearsalDialog(
+            viewModel = viewModel,
+            onExit = {
+                showExitDialog = false
+                viewModel.exit()
+                onGoBack()
+            },
+            onProseAndExit = {
+                showExitDialog = false
+                proseExitAfterSave = true
+                showProseDialog = true
+            },
+            onNewSegment = {
+                showExitDialog = false
+                viewModel.start(unrestricted = true, startNew = true)
+            },
+            onDismiss = { showExitDialog = false },
+        )
+    }
 }
 
 @Composable
 private fun LiveBar(viewModel: RehearsalViewModel) {
+    // 单行紧凑直播条：每角色一个状态点 + 名字；正在发言的角色在行尾显示流式尾文
+    val speaking = viewModel.participants.firstOrNull { participant ->
+        (viewModel.activities[participant.id] ?: ActivitySnapshot("idle", "")).status == "speaking"
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
             .padding(horizontal = 12.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        viewModel.participants.forEach { participant ->
-            val activity = viewModel.activities[participant.id] ?: ActivitySnapshot("idle", "")
-            val dotColor = when (activity.status) {
-                "speaking" -> Color(0xFF2E7D32)
-                "thinking" -> Color(0xFFB26A00)
-                else -> Color(0xFF9E9E9E)
-            }
-            Surface(
-                shape = MaterialTheme.shapes.small,
-                color = MaterialTheme.colorScheme.surfaceVariant,
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            viewModel.participants.forEach { participant ->
+                val activity = viewModel.activities[participant.id] ?: ActivitySnapshot("idle", "")
+                val dotColor = when (activity.status) {
+                    "speaking" -> Color(0xFF2E7D32)
+                    "thinking" -> Color(0xFFB26A00)
+                    else -> Color(0xFF9E9E9E)
+                }
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
                 ) {
-                    Box(
-                        Modifier
-                            .size(8.dp)
-                            .background(dotColor, CircleShape),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        participant.name,
-                        style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    if (activity.status == "speaking" && activity.stream.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            Modifier
+                                .size(8.dp)
+                                .background(dotColor, CircleShape),
+                        )
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            activity.stream.replace(Regex("\\s+"), " ").takeLast(40),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            participant.name,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 120.dp),
                         )
                     }
                 }
             }
+        }
+        speaking?.let { participant ->
+            val activity = viewModel.activities[participant.id] ?: return@let
+            Spacer(Modifier.width(8.dp))
+            Text(
+                activity.stream.replace(Regex("\\s+"), " ").takeLast(30),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun LineRow(
+private fun RoleplayLineBubble(
     ui: UiLine,
     menuExpanded: Boolean,
     onDismissMenu: () -> Unit,
@@ -649,27 +726,49 @@ private fun LineRow(
     onEdit: () -> Unit,
     onCopy: () -> Unit,
 ) {
+    // Operit 头像+气泡风格：AI 行按 roleName 查角色卡头像；
+    // 气泡已显示角色名时不再重复行首标签（主题关闭角色名时才补上）
+    val themeSnapshot = LocalThemePreferenceSnapshot.current
     Box {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .combinedClickable(onClick = {}, onLongClick = onLongPress)
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .combinedClickable(onClick = {}, onLongClick = onLongPress),
         ) {
-            Text(
-                "[${if (ui.line.user) "user:${ui.line.speaker}" else ui.line.speaker}] ",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Bold,
-                color = if (ui.line.user) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.tertiary
-                },
-            )
-            Text(
-                ui.line.text,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.weight(1f),
+            if (ui.line.user || !themeSnapshot.showRoleName) {
+                Text(
+                    ui.line.speaker,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (ui.line.user) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.tertiary
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(
+                            start = if (ui.line.user) 0.dp else 16.dp,
+                            end = if (ui.line.user) 16.dp else 0.dp,
+                            top = 4.dp,
+                        ),
+                    textAlign = if (ui.line.user) androidx.compose.ui.text.style.TextAlign.End else androidx.compose.ui.text.style.TextAlign.Start,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            BubbleStyleChatMessage(
+                message = ChatMessage(
+                    sender = if (ui.line.user) "user" else "ai",
+                    content = ui.line.text,
+                    roleName = if (ui.line.user) "" else ui.line.speaker,
+                ),
+                userMessageColor = MaterialTheme.colorScheme.primaryContainer,
+                aiMessageColor = MaterialTheme.colorScheme.surfaceVariant,
+                userTextColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                aiTextColor = MaterialTheme.colorScheme.onSurface,
+                systemMessageColor = MaterialTheme.colorScheme.tertiaryContainer,
+                systemTextColor = MaterialTheme.colorScheme.onTertiaryContainer,
             )
         }
         DropdownMenu(expanded = menuExpanded, onDismissRequest = onDismissMenu) {
@@ -843,6 +942,118 @@ private fun OrderDialog(viewModel: RehearsalViewModel, onDismiss: () -> Unit) {
             }) { Text("保存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun ProseDialog(
+    viewModel: RehearsalViewModel,
+    onSaved: () -> Unit = {},
+    onDismiss: () -> Unit,
+) {
+    // 对齐电脑 pi-xie 的 /对戏成文：选章节（最新在前）→ 可选续写位置 → 成文 → 保存落盘
+    val chapters by produceState(initialValue = emptyList<ChapterInfo>()) {
+        value = withContext(Dispatchers.IO) { viewModel.chapters().reversed() }
+    }
+    var chapterFile by remember { mutableStateOf(chapters.firstOrNull()?.file) }
+    var continuation by remember { mutableStateOf("") }
+    var started by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("对戏成文") },
+        text = {
+            Column {
+                if (chapters.isEmpty()) {
+                    Text(
+                        "还没有章节，请先在写作里写出章节。",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                } else if (!started && viewModel.proseDraft.isEmpty() && !viewModel.proseBusy) {
+                    Text(
+                        "把当前对戏记录改写成小说正文（逐句保留台词）写入所选章节，可选续写。",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        chapters.forEach { chapter ->
+                            FilterChip(
+                                selected = chapterFile == chapter.file,
+                                onClick = { chapterFile = chapter.file },
+                                label = { Text("第${chapter.number}章") },
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = continuation,
+                        onValueChange = { continuation = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("成文后继续写到的位置（可选）") },
+                        placeholder = { Text("例如：继续写到太阳落山，两人下山。留空则只写入对话正文") },
+                        minLines = 2,
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = viewModel.proseDraft,
+                        onValueChange = { viewModel.proseDraft = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 200.dp, max = 420.dp),
+                        label = { Text(if (viewModel.proseBusy) "成文中…" else "正文（可修改）") },
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            when {
+                started && viewModel.proseDraft.isNotEmpty() && !viewModel.proseBusy -> {
+                    TextButton(onClick = {
+                        viewModel.saveProseToChapter()
+                        onSaved()
+                        onDismiss()
+                    }) { Text("保存") }
+                }
+                !started && chapters.isNotEmpty() && chapterFile != null && !viewModel.proseBusy -> {
+                    TextButton(onClick = {
+                        started = true
+                        viewModel.draftProse(chapterFile!!, continuation)
+                    }) { Text("成文") }
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        },
+    )
+}
+
+/** 退出对戏菜单：与电脑 pi-xie 一致的三选项。 */
+@Composable
+private fun ExitRehearsalDialog(
+    viewModel: RehearsalViewModel,
+    onExit: () -> Unit,
+    onProseAndExit: () -> Unit,
+    onNewSegment: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("对戏模式") },
+        text = {
+            Column {
+                TextButton(onClick = onExit) { Text("退出对戏") }
+                TextButton(onClick = onProseAndExit) { Text("退出并成文") }
+                TextButton(onClick = onNewSegment) { Text("新开一段对戏") }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
     )
 }
 

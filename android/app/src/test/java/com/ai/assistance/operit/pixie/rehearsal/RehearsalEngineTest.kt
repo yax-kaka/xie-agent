@@ -188,6 +188,11 @@ class RehearsalEngineTest {
         assertEquals("策栖辞", session.userRoleName)
         assertEquals(RoleLine("策栖辞", "早。", user = true), session.segment.last())
 
+        // 内部 id 与显示名归一化：@ceqici 也切换为「策栖辞」，记录行/顶栏用显示名
+        f.engine.advance(session, "@ceqici 回来了。")
+        assertEquals("策栖辞", session.userRoleName)
+        assertEquals(RoleLine("策栖辞", "回来了。", user = true), session.segment.last())
+
         // 未知角色名整体按原文记为台词，不切换角色
         f.engine.advance(session, "@千夏你来了")
         assertEquals("策栖辞", session.userRoleName)

@@ -54,6 +54,7 @@ import com.ai.assistance.operit.ui.features.workflow.screens.WorkflowListScreen
 import com.ai.assistance.operit.ui.features.workflow.screens.WorkflowDetailScreen
 import com.ai.assistance.operit.ui.main.navigation.AppRouterGateway
 import com.ai.assistance.operit.pixie.ui.RehearsalScreen
+import com.ai.assistance.operit.pixie.ui.WritingScreen
 
 // 路由配置类
 typealias ScreenNavigationHandler = (Screen) -> Unit
@@ -127,6 +128,30 @@ sealed class Screen(
                     onLoading = onLoading,
                     onError = onError,
                     onGestureConsumed = onGestureConsumed
+            )
+        }
+    }
+
+    data object Writing :
+            Screen(
+                    navItem = NavItem.Writing,
+                    titleRes = R.string.screen_title_writing,
+                    usesRouteViewModelStore = true,
+            ) {
+        @Composable
+        override fun Content(
+                navController: NavController,
+                navigateTo: ScreenNavigationHandler,
+                onGoBack: () -> Unit,
+                hasBackgroundImage: Boolean,
+                onLoading: (Boolean) -> Unit,
+                onError: (String) -> Unit,
+                onGestureConsumed: (Boolean) -> Unit
+        ) {
+            WritingScreen(
+                onGoBack = onGoBack,
+                onOpenRehearsal = { navigateTo(Rehearsal) },
+                onOpenModelConfig = { navigateTo(ModelConfig) },
             )
         }
     }

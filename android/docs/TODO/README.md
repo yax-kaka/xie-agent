@@ -13,8 +13,12 @@
 - [x] `assembleDebug` 出 APK（123.9MB，后续瘦身）+ 真机（魅族 Note 16 Pro）安装启动无崩溃 → 基线提交 `6b6ddfe`
 - [x] Phase 1 Step 1：工作区/记录/解析/提示词 Kotlin 移植（pixie.workspace + RehearsalRecord + RoleplayParsing + PixiePrompts，含 golden 单测 25 例全绿）；清理 6 个依赖未移植模块的孤儿测试文件
 - [x] Phase 1 Step 2：对戏引擎 RehearsalEngine（常驻转录/自判发言/轮内串行/点名/重说/改台词/发言顺序持久化，golden 单测 9 例全绿）+ AIServiceTurnRunner 流式接入（禁重试，abort 干净）
-- [x] Phase 1 Step 3：对戏屏 RehearsalScreen（侧边栏入口；可点命令：点名条/重说/改台词/发言顺序/监视；长按台词菜单；直播条；监视面板左右滑动）+ 快捷新建角色/场景
-- [x] 模拟器真机冒烟：应用启动无崩溃 → 侧边栏对戏入口 → 设置页（新建角色/场景、选择、起始情境预填）→ 开始对戏 → 台词行落盘 + 全场判断轮（无 API key 时优雅失败「全场沉默」，不崩溃）。真实 AI 回复待配置模型后验证
+- [x] Phase 1 Step 3：对戏屏（Operit 头像+气泡风格、成文/监视/顺序/退出菜单、点名条、直播条、长按菜单、快捷新建角色/场景）
+- [x] 写作屏：入口改为「写作」（侧边栏），前提面板（世界观/大纲/时间线/风格/角色/场景，AI 起草+保存），写作对话（Operit 气泡 + 经典输入栏：语音位/＋附件/模型/发送），AI 只出文本提案、保存才落盘
+- [x] 工作区 zip 导入/导出（与电脑 pi-xie 互拷；路径穿越防护；golden 单测 4 例）；真机用电脑项目 zip 导入 46 文件、续写对戏、AI 接话、记录回写原文件全部验证通过
+- [x] 角色 → 导出到 Operit 角色卡；角色图片上传 → 写作 agent 视觉分析更新外貌（保留其它设定，回归单测）
+- [x] 对戏成文：按电脑 pi-xie /对戏成文 逻辑（选章节最新在前 + 可选续写位置 → 保真规则改写 → 保存落盘）；退出菜单三选项（退出/退出并成文/新开一段）
+- [x] 气泡默认头像改为灰色圆（无头像图片时不用默认图标）；导入/导出文字按钮（↓导入 ↑导出）
 - [ ] 瘦身：清理 assets 里 OS 自动化残留（desktop.apk/accessibility.apk/shizuku.apk/templates）与 filament 等大依赖
 
 ## Phase 0 构建基线

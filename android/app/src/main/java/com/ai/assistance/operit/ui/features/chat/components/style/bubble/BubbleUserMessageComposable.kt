@@ -7,6 +7,7 @@ import android.util.Base64
 import com.ai.assistance.operit.util.AppLogger
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -380,13 +381,12 @@ fun BubbleUserMessageComposable(
                                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                             )
                         } else {
-                            Icon(
-                                imageVector = if (isProxySender) Icons.Default.Assistant else Icons.Default.Person,
-                                contentDescription = "User Avatar",
+                            // 无头像图片时用灰色圆占位（不用默认图标）
+                            Box(
                                 modifier = Modifier
                                     .size(32.dp)
-                                    .clip(avatarShape),
-                                tint = if (isProxySender) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
+                                    .clip(avatarShape)
+                                    .background(Color(0xFFBDBDBD)),
                             )
                         }
                     }
@@ -661,13 +661,12 @@ fun BubbleUserMessageComposable(
                         contentScale = androidx.compose.ui.layout.ContentScale.Crop
                     )
                 } else {
-                    Icon(
-                        imageVector = if (isProxySender) Icons.Default.Assistant else Icons.Default.Person,
-                        contentDescription = "User Avatar",
+                    // 无头像图片时用灰色圆占位（不用默认图标）
+                    Box(
                         modifier = Modifier
                             .size(32.dp)
-                            .clip(avatarShape),
-                        tint = if (isProxySender) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                            .clip(avatarShape)
+                            .background(Color(0xFFBDBDBD))
                     )
                 }
             }

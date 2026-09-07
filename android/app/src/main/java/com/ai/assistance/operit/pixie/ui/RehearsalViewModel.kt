@@ -8,14 +8,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ai.assistance.operit.pixie.prompt.PixiePrompts
 import com.ai.assistance.operit.pixie.rehearsal.AIServiceTurnRunner
 import com.ai.assistance.operit.pixie.rehearsal.RehearsalEngine
 import com.ai.assistance.operit.pixie.rehearsal.RehearsalSession
 import com.ai.assistance.operit.pixie.rehearsal.WorkspaceCharacterPromptProvider
 import com.ai.assistance.operit.pixie.roleplay.RehearsalParticipant
+import com.ai.assistance.operit.pixie.workspace.ChapterInfo
 import com.ai.assistance.operit.pixie.workspace.EntityKind
 import com.ai.assistance.operit.pixie.workspace.EntityRecord
 import com.ai.assistance.operit.pixie.workspace.PixieWorkspace
+import com.ai.assistance.operit.pixie.workspace.RehearsalRecord
 import com.ai.assistance.operit.pixie.workspace.RoleLine
 import com.ai.assistance.operit.pixie.workspace.WorkspaceStore
 import kotlinx.coroutines.CancellationException
@@ -55,9 +58,80 @@ class RehearsalViewModel(application: Application) : AndroidViewModel(applicatio
     var selectedCharacterIds by mutableStateOf(emptyList<String>())
     var userRoleName by mutableStateOf<String?>(null)
     var sceneStart by mutableStateOf("")
-    var hasRecord by mutableStateOf(false)
+    /** 当前场景 + 选中角色组合是否已有对戏记录（决定是否显示「续写对戏」）。 */
+    fun recordExistsFor(sceneId: String, characterIds: List<String>): Boolean {
+        if (sceneId.isBlank() || characterIds.isEmpty()) return false
+        return com.ai.assistance.operit.pixie.workspace.RehearsalRecord
+            .recordPathFor(PixieWorkspace.root(getApplication()), sceneId, characterIds)
+            .exists()
+    }
 
     val active: Boolean get() = session != null
+
+    // 成文（对齐电脑 pi-xie 的 /对戏成文）：把本段对戏交给写作 agent，
+    // 改写为正文写入目标章节并可选续写；AI 只输出草案，点保存才真正落盘
+    var proseBusy by mutableStateOf(false)
+    var proseDraft by mutableStateOf("")
+    private var proseChapterFile: String? = null
+    private var unrestrictedValue = true
+
+    fun chapters(): List<ChapterInfo> = store.listChapters()
+
+    /** 按保真规则把当前对戏记录改写成正文（流式写入 proseDraft，目标是 [chapterFile] 章节）。 */
+    fun draftProse(chapterFile: String, continuation: String) {
+        val current = session ?: return
+        if (proseBusy) return
+        viewModelScope.launch(Dispatchers.IO) {
+            proseBusy = true
+            proseDraft = ""
+            proseChapterFile = chapterFile
+            try {
+                val transcript = current.segment.joinToString("\n") { RehearsalRecord.formatRoleLine(it) }
+                val instruction = PixiePrompts.buildChapterProseInstruction(
+                    chapterFile = chapterFile,
+                    sceneName = current.sceneName,
+                    transcript = transcript,
+                    continuation = continuation.trim().ifEmpty { null },
+                ) + "\n\n当前环境没有文件工具：请直接输出「写回后的完整章节正文」（现有内容 + 改写正文 + 续写），不要省略现有内容，不要任何前后缀。"
+                val systemPrompt = PixiePrompts.buildWritingSystemPrompt(
+                    unrestricted = unrestrictedValue,
+                    worldview = store.readConstraint("worldview"),
+                    outline = store.readConstraint("outline"),
+                    timeline = store.readConstraint("timeline"),
+                    style = store.readConstraint("style"),
+                    characterSummaries = store.listEntities(EntityKind.CHARACTERS)
+                        .map { "${it.name}：${it.body.take(120)}" },
+                    sceneSummaries = store.listEntities(EntityKind.SCENES)
+                        .map { "${it.name}：${it.body.take(120)}" },
+                )
+                runner.runTurn(
+                    systemPrompt = systemPrompt,
+                    history = emptyList(),
+                    extraUser = instruction,
+                    onDelta = { delta -> proseDraft += delta },
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                notice = "成文失败：${e.message}"
+            } finally {
+                proseBusy = false
+            }
+        }
+    }
+
+    /** 保存成文草案：整章改写为目标章节（AI 输出的就是完整章节正文）。 */
+    fun saveProseToChapter() {
+        val chapter = proseChapterFile ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val info = store.rewriteChapter(proseDraft, chapter)
+                notice = "已写入章节 ${info.file}"
+            } catch (e: Exception) {
+                notice = "写入章节失败：${e.message}"
+            }
+        }
+    }
 
     fun loadSetupData() {
         viewModelScope.launch(Dispatchers.IO) { loadSetupDataInternal() }
@@ -76,15 +150,6 @@ class RehearsalViewModel(application: Application) : AndroidViewModel(applicatio
         sceneId = sceneList.firstOrNull()?.id ?: ""
         selectedCharacterIds = emptyList()
         sceneStart = sceneList.firstOrNull()?.let { "进入场景：${it.name}。" } ?: ""
-        hasRecord = sceneList.any { scene ->
-            charList.isNotEmpty() &&
-                com.ai.assistance.operit.pixie.workspace.RehearsalRecord
-                    .recordPathFor(
-                        PixieWorkspace.root(getApplication()),
-                        scene.id,
-                        charList.map { it.id },
-                    ).exists()
-        }
     }
 
     fun selectScene(id: String) {
@@ -122,6 +187,7 @@ class RehearsalViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun start(unrestricted: Boolean, startNew: Boolean) {
+        unrestrictedValue = unrestricted
         val scene = scenes.firstOrNull { it.id == sceneId } ?: return
         val participants = selectedCharacterIds.mapNotNull { id ->
             characters.firstOrNull { it.id == id }
@@ -178,6 +244,8 @@ class RehearsalViewModel(application: Application) : AndroidViewModel(applicatio
                 notice = "对戏失败：${e.message}"
             } finally {
                 busy = false
+                // @角色 切换扮演后同步顶栏标签
+                userRoleLabel = current.userRoleName ?: "旁白/自己"
             }
         }
     }
@@ -240,6 +308,8 @@ class RehearsalViewModel(application: Application) : AndroidViewModel(applicatio
         busy = false
         summary = ""
         notice = ""
+        // 回到设置页前重读实体：退出期间角色/场景可能被外部修改（含角色管理、电脑互拷）
+        loadSetupData()
     }
 
     override fun onCleared() {

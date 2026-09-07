@@ -384,11 +384,17 @@ class RehearsalEngine(
         var text = speak.text.trim()
         if (target is SpeakTarget.User) {
             val roleName = target.roleName
-            val known =
-                roleName in NARRATOR_ROLES ||
-                    store.listEntities(EntityKind.CHARACTERS).any { it.id == roleName || it.name == roleName }
-            if (known) {
-                session.userRoleName = roleName
+            val knownEntity =
+                if (roleName in NARRATOR_ROLES) {
+                    null
+                } else {
+                    store.listEntities(EntityKind.CHARACTERS)
+                        .firstOrNull { it.id == roleName || it.name == roleName }
+                }
+            if (roleName in NARRATOR_ROLES || knownEntity != null) {
+                // 归一化：内部 id 或名字都归一到角色显示名，
+                // 否则记录行会出现 [user:ceqici] 这种与顶栏/角色卡不一致的内部标识
+                session.userRoleName = knownEntity?.name ?: roleName
             } else {
                 // 未知角色名（如没打空格的「@千夏你来了」）：不切换角色，整行按原文记为台词
                 target = null

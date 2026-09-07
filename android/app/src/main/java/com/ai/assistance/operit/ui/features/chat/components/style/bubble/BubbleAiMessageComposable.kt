@@ -7,6 +7,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -307,11 +308,9 @@ fun BubbleAiMessageComposable(
                                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                             )
                         } else {
-                            Icon(
-                                imageVector = Icons.Default.Assistant,
-                                contentDescription = "AI Avatar",
-                                modifier = avatarModifier,
-                                tint = MaterialTheme.colorScheme.secondary,
+                            // 无头像图片时用灰色圆占位（不用默认图标）
+                            Box(
+                                modifier = avatarModifier.background(Color(0xFFBDBDBD)),
                             )
                         }
                         Spacer(modifier = Modifier.width(8.dp))
@@ -497,11 +496,9 @@ fun BubbleAiMessageComposable(
                     contentScale = androidx.compose.ui.layout.ContentScale.Crop
                 )
             } else {
-                Icon(
-                    imageVector = Icons.Default.Assistant,
-                    contentDescription = "AI Avatar",
-                    modifier = avatarModifier,
-                    tint = MaterialTheme.colorScheme.secondary
+                // 无头像图片时用灰色圆占位（不用默认图标）
+                Box(
+                    modifier = avatarModifier.background(Color(0xFFBDBDBD))
                 )
             }
             Spacer(modifier = Modifier.width(8.dp))

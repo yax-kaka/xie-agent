@@ -4171,6 +4171,8 @@
     <string name="tavern_card_parse_error">解析酒馆角色卡时出错: %1$s</string>
 
     <!-- Screen Titles -->
+    <string name="screen_title_writing">写作</string>
+    <string name="screen_title_writing_desc">写作工作区：世界观、大纲、角色、场景等前置设定，就绪后进入对戏；支持与电脑 pi-xie 互拷</string>
     <string name="screen_title_rehearsal">对戏</string>
     <string name="screen_title_rehearsal_desc">多角色对戏排练：AI 扮演角色，点名、重说、改台词、发言顺序、监视</string>
     <string name="screen_title_memory_base">记忆库</string>

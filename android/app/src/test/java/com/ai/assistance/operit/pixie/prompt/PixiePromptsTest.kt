@@ -102,6 +102,21 @@ class PixiePromptsTest {
     }
 
     @Test
+    fun appearanceUpdateKeepsExistingSettingAndOnlyUpdatesLooks() {
+        // 回归：外貌分析曾只输出外貌描写，保存后覆盖整份人物设定
+        val instruction = PixiePrompts.buildAppearanceUpdateInstruction(
+            imageId = "img-1",
+            charName = "绯雪",
+            currentBody = "红发，温柔而敏锐，曾是医生。",
+        )
+        assertTrue(instruction.contains("img-1"))
+        assertTrue(instruction.contains("现有设定"))
+        assertTrue(instruction.contains("红发，温柔而敏锐，曾是医生。"))
+        assertTrue(instruction.contains("保留现有设定中与外貌无关的内容"))
+        assertTrue(instruction.contains("输出更新后的完整设定正文"))
+    }
+
+    @Test
     fun castPromptListsCharactersWithHintsAndDefaultRole() {
         val prompt = PixiePrompts.buildCastPrompt(
             sceneName = "早饭餐桌",

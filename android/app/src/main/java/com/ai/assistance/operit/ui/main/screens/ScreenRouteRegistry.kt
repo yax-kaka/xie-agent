@@ -118,14 +118,19 @@ object ScreenRouteRegistry {
                 order = 10
             ),
             hostEntryDefinition(
-                entryId = "main.rehearsal",
-                screen = Screen.Rehearsal,
+                entryId = "main.writing",
+                screen = Screen.Writing,
                 surface = NavigationSurface.MAIN_SIDEBAR_AI,
-                launchNavItem = NavItem.Rehearsal,
-                titleResId = R.string.screen_title_rehearsal,
-                descriptionResId = R.string.screen_title_rehearsal_desc,
-                icon = NavItem.Rehearsal.icon,
+                launchNavItem = NavItem.Writing,
+                titleResId = R.string.screen_title_writing,
+                descriptionResId = R.string.screen_title_writing_desc,
+                icon = NavItem.Writing.icon,
                 order = 15
+            ),
+            hostEntryDefinition(
+                entryId = "hidden.rehearsal",
+                screen = Screen.Rehearsal,
+                launchNavItem = NavItem.Rehearsal
             ),
             hostEntryDefinition(
                 entryId = "main.assistant_config",
