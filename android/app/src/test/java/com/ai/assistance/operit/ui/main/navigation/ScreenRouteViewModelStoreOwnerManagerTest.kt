@@ -240,33 +240,6 @@ class ScreenRouteViewModelStoreOwnerManagerTest {
         assertFalse(newHomeVm.onClearedCalled)
     }
 
-    // ==== keepAlive 路由：stableScreenKey 复用 ====
-
-    @Test
-    fun keepAliveRoute_usesStableScreenKeyAndReusesOwner() {
-        val manager = ScreenRouteViewModelStoreOwnerManager()
-        val resolveKeepAlive: (RouteEntry) -> Screen? = {
-            Screen.ToolPkgComposeDsl(
-                containerPackageName = "pkg",
-                uiModuleId = "mod",
-                title = "t",
-                keepAlive = true,
-            )
-        }
-
-        val entry1 = RouteEntry(routeId = "toolpkg")
-        val key1 = routeScreenKey(entry1, resolveKeepAlive)!!
-        assertEquals("toolpkg_keepalive:pkg:mod", key1)
-        val vm = trackableVM(manager.ownerFor(key1))
-
-        // 同 routeId 再次进入：stableScreenKey 相同 → 复用同一 owner/VM
-        val entry2 = RouteEntry(routeId = "toolpkg")
-        val key2 = routeScreenKey(entry2, resolveKeepAlive)!!
-        assertEquals(key1, key2)
-        assertSame(vm, trackableVM(manager.ownerFor(key2)))
-        assertFalse(vm.onClearedCalled)
-    }
-
     // ==== AppContent 重建（配置变化/跨 600dp）：attach 同步 = alive + current ====
     // attach 同步只在首次组合执行一次（LaunchedEffect(Unit)）：pop 后 alive
     // 立即更新，但退出动画未完成、离页仍在渲染，不得触发 retainOnly；

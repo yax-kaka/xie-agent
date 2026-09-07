@@ -11,6 +11,7 @@
 - [x] 裁剪编译闭环：删除依赖已删模块的功能代码（本地模型/3D 角色/shower 自动化/终端/FFmpeg/JS 工具包生态，约 150 文件），`compileDebugKotlin` 通过
 - [x] CMake 只保留聊天流式渲染 streamnative 库（去掉 sherpa-ncnn/WAMR）；abiFilters 加 x86_64 供模拟器调试
 - [x] `assembleDebug` 出 APK（123.9MB，后续瘦身）+ 真机（魅族 Note 16 Pro）安装启动无崩溃 → 基线提交 `6b6ddfe`
+- [x] Phase 1 Step 1：工作区/记录/解析/提示词 Kotlin 移植（pixie.workspace + RehearsalRecord + RoleplayParsing + PixiePrompts，含 golden 单测 25 例全绿）；清理 6 个依赖未移植模块的孤儿测试文件
 - [ ] 瘦身：清理 assets 里 OS 自动化残留（desktop.apk/accessibility.apk/shizuku.apk/templates）与 filament 等大依赖
 
 ## Phase 0 构建基线
@@ -21,8 +22,8 @@
 
 ## Phase 1 对戏优先（核心卖点）
 
-- [ ] 工作区：premises 文件格式（角色/场景/世界观/大纲/时间线/风格/规则/active.json）+ 章节文件，与 pi-xie 一致
-- [ ] 对戏核心：常驻角色 agent（独立转录、他人台词引述格式）、轮内串行、发言顺序（# 顺序：）、点名、重说、改台词、沉默判定、标签去重/他人标签丢弃、对戏记录格式一致
+- [x] 工作区：premises 文件格式（角色/场景/世界观/大纲/时间线/风格/active.json）+ 章节文件 + 对戏记录格式（# 起始：/# 顺序：/角色行/散文），与 pi-xie 一致
+- [ ] 对戏核心：常驻角色 agent（独立转录、他人台词引述格式）、轮内串行、发言顺序、点名、重说、改台词、沉默判定、标签去重/他人标签丢弃（解析器与提示词已随 Step 1 完成，engine 待做）
 - [ ] 对戏 UI：聊天流（角色行/[子代理]/续写历史）、可点击命令面板与工具栏、点名条、直播条、监视面板（滑动切换）、台词长按菜单
 - [ ] 成文（保真规则）写入章节；自动成文开关
 - [ ] 破甲优先：写作/角色 agent 自建系统提示词（不含 Operit 默认提示词），破甲块置顶，设置页可点开关
@@ -30,6 +31,9 @@
 ## Phase 2 角色管理与写作
 
 - [ ] 角色管理页（新建/编辑：名字、设定、自定义提示词、标签；导入/删除；对戏中热更新人设）
+  - 注意：AI 新建/修改角色走**写作 agent 的 entity 工具**（list_entities/create_entity/update_entity/delete_entity，落盘 premises/characters/*.md），
+    不走 Operit 原「人设卡生成」路径——该路径的工具结果不回传 AI、无新建工具、无活跃卡时静默失败，AI 会返回虚假成功。
+    我们的实现要求：工具结果真实回传到 agent 循环，写入后重读校验，绝不虚构成功。
 - [ ] 写作 agent（自建提示词 + 破甲置顶、章节/前提读写、流式打断、规则开关）、章节浏览
 
 ## Phase 3 成熟化与发布
@@ -39,5 +43,6 @@
 ## 验收
 
 - Kotlin 单测：对戏解析器、发言顺序、成文指令、提示词组装（破甲置顶且无 Operit 默认提示词）；文件格式 golden 夹具来自电脑 pi-xie 真实产物
+- 角色新建/修改验收：写作 agent 建角色 → premises/characters/<id>.md 真实落盘 → 重读一致 → 对戏可选用；AI 回复不得虚假声称成功
 - Compose UI 测试：命令面板、点名条、长按菜单、监视面板、破甲开关
 - 真机验收：进对戏 → 点名 → 重说/改台词 → 监视 → 成文 → 导出互拷回电脑 pi-xie 打开一切正常

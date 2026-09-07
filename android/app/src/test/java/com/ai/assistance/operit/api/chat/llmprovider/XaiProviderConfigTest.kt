@@ -3,10 +3,16 @@ package com.ai.assistance.operit.api.chat.llmprovider
 import com.ai.assistance.operit.data.collects.ApiProviderConfigs
 import com.ai.assistance.operit.data.model.ApiProviderType
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class XaiProviderReasoningTest {
+/**
+ * XAI 提供商默认配置测试。
+ *
+ * 原 XaiProviderReasoningTest 中的 reasoning effort 用例依赖的
+ * XaiReasoningMapper / xaiModelSupportsReasoningEffort 未随基线移植，
+ * 已移除；仅保留仍然有效的端点与默认模型用例。
+ */
+class XaiProviderConfigTest {
     @Test
     fun defaultConfigUsesTheOfficialXaiEndpointAndModel() {
         assertEquals(
@@ -24,30 +30,5 @@ class XaiProviderReasoningTest {
                 ApiProviderType.XAI
             )
         )
-    }
-
-    @Test
-    fun enabledOptionsMapToXaiEfforts() {
-        assertEquals(
-            listOf("low", "medium", "high", "xhigh"),
-            listOf("low", "medium", "high", "xhigh").map {
-                XaiReasoningMapper.effortForOption(optionId = it)
-            }
-        )
-    }
-
-    @Test
-    fun mapperPreservesTheSelectedEffort() {
-        assertEquals(
-            "high",
-            XaiReasoningMapper.effortForOption(optionId = "high")
-        )
-    }
-
-    @Test
-    fun reasoningEffortUsesTheGrokFamilyRule() {
-        assertTrue(xaiModelSupportsReasoningEffort("grok-4.6"))
-        assertTrue(xaiModelSupportsReasoningEffort("grok-4.5-latest"))
-        assertTrue(xaiModelSupportsReasoningEffort("grok-3-mini"))
     }
 }

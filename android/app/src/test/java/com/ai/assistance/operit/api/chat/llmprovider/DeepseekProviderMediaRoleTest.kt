@@ -240,16 +240,24 @@ class DeepseekProviderMediaRoleTest {
                 supportsVision = true,
                 enableToolCall = true
             )
+        // createRequestBody 在 OpenAIProvider 中为 protected：与本文件 Deepseek
+        // 用例一致，用反射调用，避免为测试新增可见性放宽的包装类。
+        val method =
+            OpenAIResponsesProvider::class.java.declaredMethods.single {
+                it.name == "createRequestBody" && it.parameterCount == 7
+            }
+        method.isAccessible = true
         val body =
-            provider.createRequestBody(
-                context = mock<Context>(),
-                chatHistory = history,
-                modelParameters = emptyList<ModelParameter<*>>(),
-                enableThinking = false,
-                stream = false,
-                availableTools = availableTools,
-                preserveThinkInHistory = false
-            )
+            method.invoke(
+                provider,
+                mock<Context>(),
+                history,
+                emptyList<ModelParameter<*>>(),
+                false,
+                false,
+                availableTools,
+                false
+            ) as RequestBody
         val buffer = Buffer()
         body.writeTo(buffer)
         return JSONObject(buffer.readUtf8())
