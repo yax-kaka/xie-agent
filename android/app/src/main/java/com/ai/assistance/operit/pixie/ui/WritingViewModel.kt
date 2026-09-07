@@ -25,6 +25,7 @@ import com.ai.assistance.operit.pixie.workspace.WorkspaceBackups
 import com.ai.assistance.operit.pixie.workspace.WorkspaceStore
 import com.ai.assistance.operit.pixie.workspace.WorkspaceTransfer
 import com.ai.assistance.operit.pixie.workspace.WritingRules
+import com.ai.assistance.operit.util.AppLogger
 import com.ai.assistance.operit.util.ImagePoolManager
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -41,7 +42,9 @@ import kotlinx.coroutines.withContext
  */
 class WritingViewModel(application: Application) : AndroidViewModel(application) {
 
-    val store: WorkspaceStore = PixieWorkspace.store(application)
+    /** 当前工作区的 WorkspaceStore（切换工作区时重建）。 */
+    var store: WorkspaceStore = PixieWorkspace.store(application)
+        private set
     private val runner = AIServiceTurnRunner(application)
 
     /** 直接使用 Operit 的 ChatMessage 模型，气泡组件拿来即用。 */
@@ -52,9 +55,76 @@ class WritingViewModel(application: Application) : AndroidViewModel(application)
     var unrestricted by mutableStateOf(PixieWorkspace.isArmorBreakEnabled(application))
     var rules by mutableStateOf(emptyList<WritingRules.EffectiveRule>())
 
+    /** 工作区名（设置弹窗显示/切换）。 */
+    var workspaceName by mutableStateOf(PixieWorkspace.activeWorkspaceName(application))
+    var workspaceNames by mutableStateOf(emptyList<String>())
+
+    /** 工具执行日志（紧凑展示，避免工具 XML 刷屏）。 */
+    val toolLog = mutableStateListOf<String>()
+    private var chatRestored = false
+
+    private val chatFile: File
+        get() = File(PixieWorkspace.root(getApplication()), ".pi-xie/writing-chat.json")
+
     fun changeUnrestricted(enabled: Boolean) {
         unrestricted = enabled
         PixieWorkspace.setArmorBreakEnabled(getApplication(), enabled)
+    }
+
+    /** 切换/新建工作区：重置全部状态并重新载入（历史数据不动）。 */
+    fun switchWorkspace(name: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                PixieWorkspace.setActiveWorkspace(getApplication(), name)
+                workspaceName = name
+                store = PixieWorkspace.store(getApplication())
+                messages.clear()
+                toolLog.clear()
+                chatRestored = false
+                notice = "已切换到工作区「$name」"
+                loadPremisesInternal()
+                workspaceNames = PixieWorkspace.listWorkspaces(getApplication())
+                restoreChat()
+            } catch (e: Exception) {
+                notice = "切换工作区失败：${e.message}"
+            }
+        }
+    }
+
+    fun createWorkspace(name: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val created = PixieWorkspace.createWorkspace(getApplication(), name)
+                workspaceNames = PixieWorkspace.listWorkspaces(getApplication())
+                notice = "已创建工作区「$created」（可在设置里切换）"
+            } catch (e: Exception) {
+                notice = "创建工作区失败：${e.message}"
+            }
+        }
+    }
+
+    /** 写作对话历史持久化：.pi-xie/writing-chat.json（退出再进不丢状态）。 */
+    private fun saveChat() {
+        try {
+            chatFile.parentFile?.mkdirs()
+            chatFile.writeText(com.google.gson.Gson().toJson(messages.toList()))
+        } catch (e: Exception) {
+            AppLogger.e("WritingViewModel", "saveChat failed", e)
+        }
+    }
+
+    private suspend fun restoreChat() {
+        if (chatRestored || messages.isNotEmpty()) return
+        chatRestored = true
+        try {
+            if (!chatFile.exists()) return
+            val type = object : com.google.gson.reflect.TypeToken<List<ChatMessage>>() {}.type
+            val restored: List<ChatMessage> =
+                com.google.gson.Gson().fromJson(chatFile.readText(), type) ?: return
+            messages.addAll(restored)
+        } catch (e: Exception) {
+            AppLogger.e("WritingViewModel", "restoreChat failed", e)
+        }
     }
 
     /** 自动写入（免确认）：.pi-xie/permissions.json，与电脑一致。 */
@@ -179,7 +249,11 @@ class WritingViewModel(application: Application) : AndroidViewModel(application)
     val pendingAttachments = mutableStateListOf<PendingAttachment>()
 
     fun loadPremises() {
-        viewModelScope.launch(Dispatchers.IO) { loadPremisesInternal() }
+        viewModelScope.launch(Dispatchers.IO) {
+            loadPremisesInternal()
+            workspaceNames = PixieWorkspace.listWorkspaces(getApplication())
+            restoreChat()
+        }
     }
 
     private suspend fun loadPremisesInternal() {
@@ -251,6 +325,7 @@ class WritingViewModel(application: Application) : AndroidViewModel(application)
             messages.add(ChatMessage(sender = "ai", content = "", roleName = "写作助理"))
             var last = messages.lastIndex
             var executedTools = 0
+            var truncatedByRoundCap = false
             try {
                 var pending = content
                 for (round in 0 until WritingAgentTools.MAX_TOOL_ROUNDS) {
@@ -272,6 +347,14 @@ class WritingViewModel(application: Application) : AndroidViewModel(application)
                         } else {
                             WritingAgentTools.execute(store, invocation)
                         }
+                        // 诊断日志：记录每次工具调用与真实结果
+                        AppLogger.d(
+                            "WritingTools",
+                            "${invocation.name} ${invocation.params} -> ${result.take(120)}",
+                        )
+                        toolLog.add(
+                            "${invocation.name} ${invocation.params.entries.joinToString(" ") { "${it.key}=${it.value.take(40)}" }} → ${result.take(60)}",
+                        )
                         "<tool_result name=\"${invocation.name}\">${result.replace("<", "&lt;")}</tool_result>"
                     }
                     executedTools += invocations.size
@@ -283,6 +366,12 @@ class WritingViewModel(application: Application) : AndroidViewModel(application)
                     messages.add(ChatMessage(sender = "ai", content = "", roleName = "写作助理"))
                     last = messages.lastIndex
                     pending = results.joinToString("\n")
+                    if (round == WritingAgentTools.MAX_TOOL_ROUNDS - 1) {
+                        truncatedByRoundCap = true
+                    }
+                }
+                if (truncatedByRoundCap) {
+                    notice = "工具轮数达到上限（${WritingAgentTools.MAX_TOOL_ROUNDS} 轮），请检查工具日志与结果"
                 }
                 if (messages[last].content.isBlank()) {
                     messages[last] = messages[last].copy(content = "（无回复）")
@@ -290,6 +379,7 @@ class WritingViewModel(application: Application) : AndroidViewModel(application)
                 if (executedTools > 0) {
                     loadPremisesInternal()
                 }
+                saveChat()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

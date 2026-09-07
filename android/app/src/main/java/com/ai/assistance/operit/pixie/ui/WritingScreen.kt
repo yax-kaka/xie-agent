@@ -3,6 +3,7 @@ package com.ai.assistance.operit.pixie.ui
 import android.app.Application
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -64,6 +65,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -85,6 +87,7 @@ import com.ai.assistance.operit.pixie.workspace.WorkspaceBackups
 import com.ai.assistance.operit.pixie.workspace.WorkspaceTransfer
 import com.ai.assistance.operit.pixie.workspace.WritingRules
 import com.ai.assistance.operit.ui.features.chat.components.AttachmentSelectorPanel
+import com.ai.assistance.operit.ui.features.chat.components.ScrollToBottomButton
 import com.ai.assistance.operit.ui.features.chat.components.compactDialogHeight
 import com.ai.assistance.operit.ui.features.chat.components.rememberCompactDialogMetrics
 import com.ai.assistance.operit.ui.features.chat.components.style.bubble.BubbleStyleChatMessage
@@ -112,10 +115,13 @@ fun WritingScreen(
     var showRules by remember { mutableStateOf(false) }
     var showChapters by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var autoScroll by remember { mutableStateOf(true) }
     val listState = rememberLazyListState()
 
     LaunchedEffect(viewModel.messages.size) {
-        if (viewModel.messages.isNotEmpty()) listState.animateScrollToItem(viewModel.messages.lastIndex)
+        if (autoScroll && viewModel.messages.isNotEmpty()) {
+            listState.animateScrollToItem(viewModel.messages.lastIndex)
+        }
     }
 
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -227,34 +233,72 @@ fun WritingScreen(
         }
         HorizontalDivider(Modifier.padding(vertical = 4.dp))
 
+        // 工具日志：紧凑折叠条，避免工具 XML 刷屏
+        if (viewModel.toolLog.isNotEmpty()) {
+            var showToolLog by remember { mutableStateOf(false) }
+            Column(Modifier.padding(horizontal = 12.dp)) {
+                TextButton(onClick = { showToolLog = !showToolLog }) {
+                    Text("工具日志（${viewModel.toolLog.size}）${if (showToolLog) "▲" else "▼"}")
+                }
+                AnimatedVisibility(visible = showToolLog) {
+                    Column(Modifier.heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
+                        viewModel.toolLog.takeLast(30).forEach { entry ->
+                            Text(
+                                entry,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // 写作对话（Operit 气泡组件直接复用：markdown/主题/头像行为一致）
-        LazyColumn(
-            state = listState,
+        Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
         ) {
-            if (viewModel.messages.isEmpty()) {
-                item {
-                    Text(
-                        "先在上面完善世界观/大纲/角色/场景等前置设定，或直接在这里和写作助理对话。全部就绪后点「对戏」进入排练。",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(16.dp),
-                    )
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                if (viewModel.messages.isEmpty()) {
+                    item {
+                        Text(
+                            "先在上面完善世界观/大纲/角色/场景等前置设定，或直接在这里和写作助理对话。全部就绪后点「对戏」进入排练。",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(16.dp),
+                        )
+                    }
+                }
+                // 工具结果的内部 user 消息不展示；工具 XML 从展示内容中剥离（模型历史仍保留完整内容）
+                items(viewModel.messages.size) { index ->
+                    val message = viewModel.messages[index]
+                    if (message.sender == "user" && message.content.startsWith("<tool_result")) {
+                        // 隐藏内部工具结果消息
+                    } else {
+                        BubbleStyleChatMessage(
+                            message = message.copy(content = stripToolMarkup(message.content)),
+                            userMessageColor = MaterialTheme.colorScheme.primaryContainer,
+                            aiMessageColor = MaterialTheme.colorScheme.surfaceVariant,
+                            userTextColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            aiTextColor = MaterialTheme.colorScheme.onSurface,
+                            systemMessageColor = MaterialTheme.colorScheme.tertiaryContainer,
+                            systemTextColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                        )
+                    }
                 }
             }
-            items(viewModel.messages.size) { index ->
-                BubbleStyleChatMessage(
-                    message = viewModel.messages[index],
-                    userMessageColor = MaterialTheme.colorScheme.primaryContainer,
-                    aiMessageColor = MaterialTheme.colorScheme.surfaceVariant,
-                    userTextColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    aiTextColor = MaterialTheme.colorScheme.onSurface,
-                    systemMessageColor = MaterialTheme.colorScheme.tertiaryContainer,
-                    systemTextColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                )
-            }
+            ScrollToBottomButton(
+                scrollState = listState,
+                coroutineScope = rememberCoroutineScope(),
+                autoScrollToBottom = autoScroll,
+                onAutoScrollToBottomChange = { autoScroll = it },
+                modifier = Modifier.align(Alignment.BottomEnd),
+            )
         }
 
         // 输入区：与 AI 对话经典输入栏完全一致的视觉结构
@@ -1010,6 +1054,8 @@ private fun SettingsDialog(viewModel: WritingViewModel, onDismiss: () -> Unit) {
     var charExpanded by remember { mutableStateOf(false) }
     var sceneExpanded by remember { mutableStateOf(false) }
     var roleExpanded by remember { mutableStateOf(false) }
+    var workspaceExpanded by remember { mutableStateOf(false) }
+    var showNewWorkspace by remember { mutableStateOf(false) }
     val tavernLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importTavern)
     }
@@ -1018,6 +1064,44 @@ private fun SettingsDialog(viewModel: WritingViewModel, onDismiss: () -> Unit) {
         title = { Text("设置") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("工作区", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "当前：${viewModel.workspaceName}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("切换：", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.width(8.dp))
+                    ExposedDropdownMenuBox(
+                        expanded = workspaceExpanded,
+                        onExpandedChange = { workspaceExpanded = it },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        OutlinedTextField(
+                            value = viewModel.workspaceName,
+                            onValueChange = {},
+                            readOnly = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .menuAnchor(),
+                        )
+                        DropdownMenu(expanded = workspaceExpanded, onDismissRequest = { workspaceExpanded = false }) {
+                            viewModel.workspaceNames.forEach { name ->
+                                DropdownMenuItem(
+                                    text = { Text(name) },
+                                    onClick = {
+                                        viewModel.switchWorkspace(name)
+                                        workspaceExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                TextButton(onClick = { showNewWorkspace = true }) { Text("＋ 新建工作区") }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("自动写入", style = MaterialTheme.typography.titleSmall)
@@ -1160,6 +1244,36 @@ private fun SettingsDialog(viewModel: WritingViewModel, onDismiss: () -> Unit) {
             TextButton(onClick = onDismiss) { Text("关闭") }
         },
     )
+    if (showNewWorkspace) {
+        NewWorkspaceDialog(viewModel = viewModel, onDismiss = { showNewWorkspace = false })
+    }
+}
+
+@Composable
+private fun NewWorkspaceDialog(viewModel: WritingViewModel, onDismiss: () -> Unit) {
+    var name by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("新建工作区") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("名称") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                viewModel.createWorkspace(name)
+                onDismiss()
+            }, enabled = name.isNotBlank()) { Text("创建") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 /** 工具执行确认（PC 行为：mutating 工具默认逐个确认）。 */
@@ -1182,3 +1296,10 @@ private fun ToolConfirmDialog(viewModel: WritingViewModel, confirm: WritingViewM
         },
     )
 }
+
+/** 展示用：从消息内容里剥离工具调用与工具结果 XML（模型历史仍保留完整内容）。 */
+private fun stripToolMarkup(content: String): String =
+    com.ai.assistance.operit.util.ChatMarkupRegex.toolOrToolResultBlock
+        .replace(content, "")
+        .replace(Regex("\\n{3,}"), "\n\n")
+        .trim()

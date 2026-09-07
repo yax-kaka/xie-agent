@@ -53,6 +53,23 @@ class PixiePromptsTest {
     }
 
     @Test
+    fun writingPromptForbidsFakeCompletionClaims() {
+        // 回归：写作助理曾被要求删除角色后谎称已删除（实际没有执行能力）
+        val prompt = PixiePrompts.buildWritingSystemPrompt(
+            unrestricted = false,
+            worldview = "",
+            outline = "",
+            timeline = "",
+            style = "",
+            characterSummaries = emptyList(),
+            sceneSummaries = emptyList(),
+        )
+        assertTrue(prompt.contains("你没有执行任何文件操作的能力"))
+        assertTrue(prompt.contains("绝不声称「已删除」「已保存」「已完成」「已写入」"))
+        assertTrue(prompt.contains("明确提示用户在界面的对应面板里点「保存」或「删除」执行"))
+    }
+
+    @Test
     fun directorModeRulesWhenUserIsNarrator() {
         val prompt = PixiePrompts.buildCharacterSystemPrompt(
             characterName = "绯雪",

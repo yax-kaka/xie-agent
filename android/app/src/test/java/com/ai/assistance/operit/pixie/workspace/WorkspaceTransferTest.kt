@@ -14,7 +14,8 @@ import org.junit.rules.TemporaryFolder
 
 /**
  * 工作区 zip 导入/导出测试：
- * 与电脑 pi-xie 工作区互拷的格式（zip 根直接含 premises/chapters/.pi-xie/manuscript.txt）。
+ * 与电脑 pi-xie 工作区互拷的格式（zip 根直接含 premises/chapters/.pi-xie/manuscript.txt），
+ * 含导入保护（冲突检测/跳过策略/备份恢复）。
  */
 class WorkspaceTransferTest {
 
@@ -39,14 +40,19 @@ class WorkspaceTransferTest {
         return root
     }
 
+    private fun exportBytes(root: File): ByteArray {
+        val bytes = ByteArrayOutputStream()
+        WorkspaceTransfer.exportZip(root, bytes)
+        return bytes.toByteArray()
+    }
+
     @Test
     fun exportImportRoundtripPreservesWorkspace() {
         val source = sampleWorkspace()
-        val bytes = ByteArrayOutputStream()
-        WorkspaceTransfer.exportZip(source, bytes)
+        val bytes = exportBytes(source)
 
         val target = tmp.newFolder("target")
-        val result = WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes.toByteArray()))
+        val result = WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes), overwrite = true)
         assertEquals(0, result.notes.size)
         assertEquals(6, result.entryCount)
 
@@ -73,7 +79,7 @@ class WorkspaceTransferTest {
             zip.closeEntry()
         }
         val target = tmp.newFolder("target")
-        val result = WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes.toByteArray()))
+        val result = WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes.toByteArray()), overwrite = true)
         assertEquals(1, result.entryCount)
         assertTrue(result.notes.any { it.contains("穿越") })
         assertTrue(File(target, "premises/characters/ok.md").exists()) // 正常条目照常导入
@@ -93,7 +99,7 @@ class WorkspaceTransferTest {
             zip.closeEntry()
         }
         val target = tmp.newFolder("target")
-        val result = WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes.toByteArray()))
+        val result = WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes.toByteArray()), overwrite = true)
         assertEquals(1, result.entryCount)
         assertTrue(result.notes.any { it.contains("movies") })
         assertTrue(File(target, "premises/worldview.md").exists())
@@ -109,7 +115,69 @@ class WorkspaceTransferTest {
             zip.closeEntry()
         }
         val target = tmp.newFolder("target")
-        val result = WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes.toByteArray()))
+        val result = WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes.toByteArray()), overwrite = true)
         assertTrue(result.notes.any { it.contains("premises") })
+    }
+
+    @Test
+    fun planImportListsConflictsAndNewFiles() {
+        val source = sampleWorkspace()
+        val bytes = exportBytes(source)
+
+        val target = tmp.newFolder("target")
+        // 先导入一次建立本地文件，再改本地内容制造冲突
+        WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes), overwrite = true)
+        File(target, "premises/worldview.md").writeText("本地改过。\n")
+
+        val plan = WorkspaceTransfer.planImport(target, ByteArrayInputStream(bytes))
+        assertTrue(plan.conflicts.contains("premises/worldview.md"))
+        assertTrue(plan.conflicts.contains("premises/characters/feixue.md"))
+        assertTrue(plan.totalFiles >= plan.conflicts.size)
+    }
+
+    @Test
+    fun skipOverwriteKeepsLocalContent() {
+        val source = sampleWorkspace()
+        val bytes = exportBytes(source)
+
+        val target = tmp.newFolder("target")
+        WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes), overwrite = true)
+        File(target, "premises/worldview.md").writeText("本地改过。\n")
+
+        val result = WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes), overwrite = false)
+        assertTrue(result.skipped.contains("premises/worldview.md"))
+        assertEquals("本地改过。\n", File(target, "premises/worldview.md").readText())
+
+        val overwriteResult = WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes), overwrite = true)
+        assertTrue(overwriteResult.skipped.isEmpty())
+        assertEquals("现代都市修仙。\n", File(target, "premises/worldview.md").readText())
+    }
+
+    @Test
+    fun backupAndRestoreRoundtripWithSafetyBackup() {
+        val source = sampleWorkspace()
+        val bytes = exportBytes(source)
+
+        val target = tmp.newFolder("target")
+        WorkspaceTransfer.importZip(target, ByteArrayInputStream(bytes), overwrite = true)
+        val backupsDir = tmp.newFolder("backups")
+
+        val backup = WorkspaceBackups.createBackup(target, backupsDir, "manual")
+        assertEquals(1, WorkspaceBackups.listBackups(backupsDir).size)
+
+        // 破坏人物设定（模拟外貌 bug 覆盖）
+        File(target, "premises/characters/feixue.md").writeText("被覆盖。\n")
+        File(target, "premises/worldview.md").writeText("被覆盖2。\n")
+
+        val (safety, result) = WorkspaceBackups.restoreBackup(target, backupsDir, backup)
+        assertEquals("红发。", File(target, "premises/characters/feixue.md").readText().lineSequence().last { it.isNotBlank() })
+        assertEquals("现代都市修仙。\n", File(target, "premises/worldview.md").readText())
+        assertTrue(safety.exists()) // 恢复前自动备份了被破坏的状态
+        // 恢复前的自动备份里是被破坏的内容
+        val safetyZip = ByteArrayInputStream(safety.readBytes())
+        val probe = tmp.newFolder("probe")
+        WorkspaceTransfer.importZip(probe, safetyZip, overwrite = true)
+        assertEquals("被覆盖。\n", File(probe, "premises/characters/feixue.md").readText())
+        assertTrue(result.entryCount > 0)
     }
 }

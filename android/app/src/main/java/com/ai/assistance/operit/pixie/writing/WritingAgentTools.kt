@@ -222,9 +222,10 @@ object WritingAgentTools {
         }
     }
 
+    /** kind 取值归一化：PC 为 character/scene，同时接受 characters/scenes 复数（模型常见笔误）。 */
     private fun entityKind(raw: String?): EntityKind? = when (raw?.trim()?.lowercase()) {
-        "character" -> EntityKind.CHARACTERS
-        "scene" -> EntityKind.SCENES
+        "character", "characters" -> EntityKind.CHARACTERS
+        "scene", "scenes" -> EntityKind.SCENES
         else -> null
     }
 }

@@ -21,6 +21,7 @@ import java.io.File
  */
 
 const val DIRECTOR_MAX_TURNS = 3
+const val AUTO_PROSE_THRESHOLD_LINES = 8
 const val DIRECTOR_CONTINUE_MESSAGE =
     "（导演模式：没有新的指示，请按当前局面自然继续互动，直到这一小场告一段落）"
 const val FORCED_TURN_MESSAGE = "（点名：本轮你必须回应，不得沉默）"
@@ -121,6 +122,9 @@ class RehearsalSession(
     val segment: MutableList<RoleLine>,
     val sessions: MutableMap<String, CharacterSession> = mutableMapOf(),
     var summary: String = "",
+    /** 自动成文：每 8 句新台词把本段对戏自动改写成排练稿。 */
+    var autoProse: Boolean = false,
+    var proseWatermark: Int = 0,
 )
 
 data class RoundOutcome(
