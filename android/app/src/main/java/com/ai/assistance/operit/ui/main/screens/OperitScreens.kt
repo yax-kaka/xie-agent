@@ -133,6 +133,7 @@ sealed class Screen(
 
     data object Rehearsal :
             Screen(
+                    navItem = NavItem.Rehearsal,
                     titleRes = R.string.screen_title_rehearsal,
                     usesRouteViewModelStore = true,
             ) {

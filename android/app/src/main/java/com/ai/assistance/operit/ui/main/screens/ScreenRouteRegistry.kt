@@ -18,7 +18,6 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.TableView
 import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material.icons.filled.TheaterComedy
 import androidx.compose.material.icons.filled.Token
 import androidx.compose.material.icons.filled.VideoSettings
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -122,9 +121,10 @@ object ScreenRouteRegistry {
                 entryId = "main.rehearsal",
                 screen = Screen.Rehearsal,
                 surface = NavigationSurface.MAIN_SIDEBAR_AI,
+                launchNavItem = NavItem.Rehearsal,
                 titleResId = R.string.screen_title_rehearsal,
                 descriptionResId = R.string.screen_title_rehearsal_desc,
-                icon = Icons.Default.TheaterComedy,
+                icon = NavItem.Rehearsal.icon,
                 order = 15
             ),
             hostEntryDefinition(

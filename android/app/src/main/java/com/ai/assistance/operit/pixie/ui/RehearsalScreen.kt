@@ -78,7 +78,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import android.app.Application
 import kotlinx.coroutines.launch
 
 /**
@@ -91,7 +95,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun RehearsalScreen(
     onGoBack: () -> Unit,
-    viewModel: RehearsalViewModel = viewModel(),
+    viewModel: RehearsalViewModel = rehearsalViewModel(),
 ) {
     LaunchedEffect(Unit) {
         if (!viewModel.active) viewModel.loadSetupData()
@@ -101,6 +105,20 @@ fun RehearsalScreen(
     } else {
         SetupSheet(viewModel = viewModel)
     }
+}
+
+/**
+ * 路由级 ViewModelStoreOwner 不是 HasDefaultViewModelProviderFactory，
+ * 默认 viewModel() 会走无参构造反射（NoSuchMethodException），必须显式给 Application 工厂。
+ */
+@Composable
+private fun rehearsalViewModel(): RehearsalViewModel {
+    val application = LocalContext.current.applicationContext as Application
+    return viewModel(
+        factory = viewModelFactory {
+            initializer { RehearsalViewModel(application) }
+        },
+    )
 }
 
 // ==================== 进入对戏设置面板 ====================

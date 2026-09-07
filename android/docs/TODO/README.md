@@ -13,7 +13,8 @@
 - [x] `assembleDebug` 出 APK（123.9MB，后续瘦身）+ 真机（魅族 Note 16 Pro）安装启动无崩溃 → 基线提交 `6b6ddfe`
 - [x] Phase 1 Step 1：工作区/记录/解析/提示词 Kotlin 移植（pixie.workspace + RehearsalRecord + RoleplayParsing + PixiePrompts，含 golden 单测 25 例全绿）；清理 6 个依赖未移植模块的孤儿测试文件
 - [x] Phase 1 Step 2：对戏引擎 RehearsalEngine（常驻转录/自判发言/轮内串行/点名/重说/改台词/发言顺序持久化，golden 单测 9 例全绿）+ AIServiceTurnRunner 流式接入（禁重试，abort 干净）
-- [x] Phase 1 Step 3：对戏屏 RehearsalScreen（侧边栏入口；可点命令：点名条/重说/改台词/发言顺序/监视；长按台词菜单；直播条；监视面板左右滑动）+ 快捷新建角色/场景；真机验收待跑
+- [x] Phase 1 Step 3：对戏屏 RehearsalScreen（侧边栏入口；可点命令：点名条/重说/改台词/发言顺序/监视；长按台词菜单；直播条；监视面板左右滑动）+ 快捷新建角色/场景
+- [x] 模拟器真机冒烟：应用启动无崩溃 → 侧边栏对戏入口 → 设置页（新建角色/场景、选择、起始情境预填）→ 开始对戏 → 台词行落盘 + 全场判断轮（无 API key 时优雅失败「全场沉默」，不崩溃）。真实 AI 回复待配置模型后验证
 - [ ] 瘦身：清理 assets 里 OS 自动化残留（desktop.apk/accessibility.apk/shizuku.apk/templates）与 filament 等大依赖
 
 ## Phase 0 构建基线

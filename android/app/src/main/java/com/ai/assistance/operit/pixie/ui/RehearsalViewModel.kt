@@ -34,7 +34,9 @@ class RehearsalViewModel(application: Application) : AndroidViewModel(applicatio
     val store: WorkspaceStore = PixieWorkspace.store(application)
     private val runner = AIServiceTurnRunner(application)
     private var engine: RehearsalEngine? = null
-    private var session: RehearsalSession? = null
+    // 必须是 snapshot state：SetupSheet 只读 active（→ session），
+    // start() 成功后若不触发任何 SetupSheet 已读状态的失效，界面永远停在设置页。
+    private var session by mutableStateOf<RehearsalSession?>(null)
 
     // 对戏状态
     val lines = mutableStateListOf<UiLine>()
@@ -58,23 +60,30 @@ class RehearsalViewModel(application: Application) : AndroidViewModel(applicatio
     val active: Boolean get() = session != null
 
     fun loadSetupData() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val sceneList = store.listEntities(EntityKind.SCENES)
-            val charList = store.listEntities(EntityKind.CHARACTERS)
-            scenes = sceneList
-            characters = charList
-            sceneId = sceneList.firstOrNull()?.id ?: ""
-            selectedCharacterIds = emptyList()
-            sceneStart = sceneList.firstOrNull()?.let { "进入场景：${it.name}。" } ?: ""
-            hasRecord = sceneList.any { scene ->
-                charList.isNotEmpty() &&
-                    com.ai.assistance.operit.pixie.workspace.RehearsalRecord
-                        .recordPathFor(
-                            PixieWorkspace.root(getApplication()),
-                            scene.id,
-                            charList.map { it.id },
-                        ).exists()
-            }
+        viewModelScope.launch(Dispatchers.IO) { loadSetupDataInternal() }
+    }
+
+    /**
+     * 同步版刷新：供 createCharacter/createScene 直接调用。
+     * 不能并发 launch，否则内部的 selectedCharacterIds = emptyList()
+     * 会与调用方随后追加的选中项竞争（先跑后跑不定，选中态被清掉）。
+     */
+    private suspend fun loadSetupDataInternal() {
+        val sceneList = store.listEntities(EntityKind.SCENES)
+        val charList = store.listEntities(EntityKind.CHARACTERS)
+        scenes = sceneList
+        characters = charList
+        sceneId = sceneList.firstOrNull()?.id ?: ""
+        selectedCharacterIds = emptyList()
+        sceneStart = sceneList.firstOrNull()?.let { "进入场景：${it.name}。" } ?: ""
+        hasRecord = sceneList.any { scene ->
+            charList.isNotEmpty() &&
+                com.ai.assistance.operit.pixie.workspace.RehearsalRecord
+                    .recordPathFor(
+                        PixieWorkspace.root(getApplication()),
+                        scene.id,
+                        charList.map { it.id },
+                    ).exists()
         }
     }
 
@@ -88,7 +97,7 @@ class RehearsalViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val record = store.createEntity(EntityKind.CHARACTERS, name, body)
-                loadSetupData()
+                loadSetupDataInternal()
                 selectedCharacterIds = selectedCharacterIds + record.id
                 notice = "已创建角色「${record.name}」"
             } catch (e: Exception) {
@@ -102,7 +111,7 @@ class RehearsalViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val record = store.createEntity(EntityKind.SCENES, name, body)
-                loadSetupData()
+                loadSetupDataInternal()
                 sceneId = record.id
                 sceneStart = "进入场景：${record.name}。"
                 notice = "已创建场景「${record.name}」"
